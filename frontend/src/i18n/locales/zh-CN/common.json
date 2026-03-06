@@ -425,6 +425,7 @@
     "search_placeholder_with_shortcut": "搜索对话... ({{shortcut}} 打开/关闭)",
     "new_task": "新任务",
     "new_conversation": "新对话",
+    "new_conversation_started": "新对话已开始",
     "no_tasks": "没有任务",
     "today": "今天",
     "this_week": "本周",

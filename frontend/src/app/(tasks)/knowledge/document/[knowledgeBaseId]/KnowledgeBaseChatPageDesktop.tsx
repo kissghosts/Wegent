@@ -39,6 +39,7 @@ import { taskKnowledgeBaseApi } from '@/apis/task-knowledge-base'
 import { listGroups } from '@/apis/groups'
 import type { Team } from '@/types/api'
 import type { GroupRole } from '@/types/group'
+import { toast } from '@/hooks/use-toast'
 
 interface KnowledgeBaseChatPageDesktopProps {
   /** Callback when knowledge base type is changed (notebook <-> classic) */
@@ -216,6 +217,11 @@ export function KnowledgeBaseChatPageDesktop({
     // Use soft navigation - router.replace will reset the URL without hard reload
     // ChatArea will detect selectedTask is null and show empty state
     router.replace(`/knowledge/document/${knowledgeBaseId}`)
+    // Show toast to give user clear feedback that new conversation started
+    toast({
+      title: t('common:tasks.new_conversation_started'),
+      duration: 2000,
+    })
 
     // Stop streams in the background without blocking navigation
     const streamingIds = getStreamingTaskIds()

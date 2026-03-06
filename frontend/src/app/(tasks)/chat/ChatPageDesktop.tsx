@@ -25,6 +25,7 @@ import { paths } from '@/config/paths'
 import { Button } from '@/components/ui/button'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useSearchShortcut } from '@/features/tasks/hooks/useSearchShortcut'
+import { toast } from '@/hooks/use-toast'
 import { ChatArea } from '@/features/tasks/components/chat'
 import { CreateGroupChatDialog } from '@/features/tasks/components/group-chat'
 
@@ -147,6 +148,11 @@ export function ChatPageDesktop() {
     // Use soft navigation - router.replace will reset the URL without hard reload
     // ChatArea will detect selectedTask is null and show empty state
     router.replace(paths.chat.getHref())
+    // Show toast to give user clear feedback that new conversation started
+    toast({
+      title: t('common:tasks.new_conversation_started'),
+      duration: 2000,
+    })
   }
 
   return (

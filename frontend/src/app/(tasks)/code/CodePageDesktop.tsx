@@ -29,6 +29,7 @@ import { useSearchShortcut } from '@/features/tasks/hooks/useSearchShortcut'
 import { Workbench } from '@/features/tasks/components'
 import { ChatArea } from '@/features/tasks/components/chat'
 import { paths } from '@/config/paths'
+import { toast } from '@/hooks/use-toast'
 
 /**
  * Desktop-specific implementation of Code Page
@@ -200,6 +201,11 @@ export function CodePageDesktop() {
     // Use soft navigation - router.replace will reset the URL without hard reload
     // ChatArea will detect selectedTask is null and show empty state
     router.replace(paths.code.getHref())
+    // Show toast to give user clear feedback that new task started
+    toast({
+      title: 'New task started',
+      duration: 2000,
+    })
   }
 
   return (
