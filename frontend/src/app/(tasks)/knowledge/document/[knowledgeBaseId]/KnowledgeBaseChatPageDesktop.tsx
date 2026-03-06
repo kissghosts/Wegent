@@ -213,7 +213,9 @@ export function KnowledgeBaseChatPageDesktop({
     // Clear state and navigate immediately for responsive UI
     setSelectedTask(null)
     clearAllStreams()
-    window.location.href = `/knowledge/document/${knowledgeBaseId}`
+    // Use soft navigation - router.replace will reset the URL without hard reload
+    // ChatArea will detect selectedTask is null and show empty state
+    router.replace(`/knowledge/document/${knowledgeBaseId}`)
 
     // Stop streams in the background without blocking navigation
     const streamingIds = getStreamingTaskIds()

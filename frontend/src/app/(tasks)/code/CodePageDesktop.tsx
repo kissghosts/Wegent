@@ -5,7 +5,7 @@
 'use client'
 
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { useSearchParams, useRouter } from 'next/navigation'
 import { teamService } from '@/features/tasks/service/teamService'
 import TopNavigation from '@/features/layout/TopNavigation'
 import {
@@ -74,6 +74,9 @@ export function CodePageDesktop() {
 
   // User state for git token check
   const { user } = useUser()
+
+  // Router for navigation
+  const router = useRouter()
 
   // Collapsed sidebar state
   const [isCollapsed, setIsCollapsed] = useState(false)
@@ -194,8 +197,9 @@ export function CodePageDesktop() {
     // This prevents the UI from being stuck showing the previous task's messages
     setSelectedTask(null)
     clearAllStreams()
-    // Force a hard reload to ensure a fresh start when already on /code
-    window.location.href = paths.code.getHref()
+    // Use soft navigation - router.replace will reset the URL without hard reload
+    // ChatArea will detect selectedTask is null and show empty state
+    router.replace(paths.code.getHref())
   }
 
   return (
