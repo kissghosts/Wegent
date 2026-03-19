@@ -138,7 +138,7 @@ export function GroupManager({ onGroupsChange }: GroupManagerProps) {
                     {t('groups:groups.members')}
                   </th>
                   <th className="px-4 py-3 text-right text-sm font-medium text-text-primary">
-                    {t('common:actions.edit')}
+                    {t('groups:groupMembers.actions')}
                   </th>
                 </tr>
               </thead>
@@ -177,28 +177,28 @@ export function GroupManager({ onGroupsChange }: GroupManagerProps) {
                       )}
                     </td>
                     <td className="px-4 py-3 text-sm text-text-secondary">
-                      {group.member_count || 0}
+                      <button
+                        type="button"
+                        onClick={() => handleMembersClick(group)}
+                        title={t('groups:groupManager.viewMembers')}
+                        data-testid={`group-members-button-${group.id}`}
+                        className="inline-flex items-center gap-2 rounded-md px-2 py-1 -mx-2 text-text-secondary transition-colors hover:bg-muted hover:text-text-primary"
+                      >
+                        <UsersIcon className="w-4 h-4" />
+                        <span>{group.member_count || 0}</span>
+                      </button>
                     </td>
                     <td className="px-4 py-3 text-sm text-right">
                       <div className="flex items-center justify-end gap-2">
-                        {group.my_role === 'Owner' && (
+                        {(group.my_role === 'Owner' || group.my_role === 'Maintainer') && (
                           <Button
                             variant="ghost"
                             size="icon"
                             onClick={() => handleEditClick(group)}
                             title={t('groups:groupManager.editGroup')}
+                            data-testid={`group-edit-button-${group.id}`}
                           >
                             <PencilIcon className="w-4 h-4" />
-                          </Button>
-                        )}
-                        {(group.my_role === 'Owner' || group.my_role === 'Maintainer') && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleMembersClick(group)}
-                            title={t('groups:groupManager.manageMembers')}
-                          >
-                            <UsersIcon className="w-4 h-4" />
                           </Button>
                         )}
                         {group.my_role === 'Owner' && (
@@ -207,6 +207,7 @@ export function GroupManager({ onGroupsChange }: GroupManagerProps) {
                             size="icon"
                             onClick={() => handleDeleteClick(group)}
                             title={t('groups:groupManager.deleteGroup')}
+                            data-testid={`group-delete-button-${group.id}`}
                           >
                             <TrashIcon className="w-4 h-4 text-error" />
                           </Button>

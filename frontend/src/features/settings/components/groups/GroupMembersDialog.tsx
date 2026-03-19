@@ -64,6 +64,7 @@ export function GroupMembersDialog({
   const canUpdateRole = canManageMembers(myRole)
   const canInviteAll = canManageMembers(myRole) && !isPrivateGroup
   const canLeaveGroup = canLeave(myRole)
+  const hasMemberManagementPermission = canAddMember || canRemoveMember || canUpdateRole
 
   useEffect(() => {
     if (isOpen && group) {
@@ -251,7 +252,11 @@ export function GroupMembersDialog({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title={t('groups:groups.actions.manageMembers')}
+      title={
+        hasMemberManagementPermission
+          ? t('groups:groups.actions.manageMembers')
+          : t('groups:groups.members')
+      }
       maxWidth="3xl"
     >
       <div className="space-y-4">
