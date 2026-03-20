@@ -28,7 +28,14 @@ import {
 import { toast } from 'sonner'
 import type { Group, GroupMember, GroupRole } from '@/types/group'
 import type { SearchUser } from '@/types/api'
-import { canManageMembers, canLeave, isOwner } from '@/types/base-role'
+import {
+  ASSIGNABLE_ROLES,
+  BASE_ROLES,
+  canLeave,
+  canManageMembers,
+  compareRoles,
+  isOwner,
+} from '@/types/base-role'
 import { ArrowUpDown, ChevronDown, ChevronUp, UserPlusIcon, LogOutIcon } from 'lucide-react'
 import { UserSearchSelect } from '@/components/common/UserSearchSelect'
 
@@ -42,22 +49,6 @@ interface GroupMembersDialogProps {
 
 type MemberSortField = 'role' | 'username' | 'joinDate'
 type SortOrder = 'asc' | 'desc'
-
-const GROUP_MEMBER_ROLE_OPTIONS: GroupRole[] = [
-  'Owner',
-  'Maintainer',
-  'Developer',
-  'Reporter',
-  'RestrictedAnalyst',
-]
-
-const GROUP_MEMBER_ROLE_ORDER: Record<GroupRole, number> = {
-  Owner: 0,
-  Maintainer: 1,
-  Developer: 2,
-  Reporter: 3,
-  RestrictedAnalyst: 4,
-}
 
 function getMemberDisplayName(member: GroupMember): string {
   return member.user_name?.trim() || `User ${member.user_id}`
@@ -102,10 +93,7 @@ function sortMembers(
         nameDiff ||
         left.user_id - right.user_id
     } else {
-      comparison =
-        GROUP_MEMBER_ROLE_ORDER[left.role] - GROUP_MEMBER_ROLE_ORDER[right.role] ||
-        nameDiff ||
-        left.user_id - right.user_id
+      comparison = compareRoles(right.role, left.role) || nameDiff || left.user_id - right.user_id
     }
 
     return sortOrder === 'asc' ? comparison : -comparison
@@ -144,10 +132,7 @@ export function GroupMembersDialog({
   const canLeaveGroup = canLeave(myRole)
   const hasMemberManagementPermission = canAddMember || canRemoveMember || canUpdateRole
   const hasUnsavedRoleChanges = Object.keys(roleDrafts).length > 0
-  const editableRoleOptions =
-    myRole === 'Owner'
-      ? GROUP_MEMBER_ROLE_OPTIONS
-      : GROUP_MEMBER_ROLE_OPTIONS.filter(role => role !== 'Owner')
+  const editableRoleOptions = myRole === 'Owner' ? BASE_ROLES : ASSIGNABLE_ROLES
   const visibleMembers = sortMembers(filterMembers(members, searchQuery), sortField, sortOrder)
 
   useEffect(() => {
