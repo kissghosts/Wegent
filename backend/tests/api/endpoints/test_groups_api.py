@@ -111,30 +111,27 @@ def test_batch_update_group_member_roles_success(
     assert reporter_member.role == "Developer"
 
 
-def test_batch_update_group_member_roles_allows_owner_transition_in_one_request(
+def test_update_group_member_role_rejects_demoting_current_group_owner(
     test_client: TestClient, test_db: Session, test_user: User, test_token: str
 ):
-    group = _create_group(test_db, test_user, name="owner-transition-group")
+    group = _create_group(test_db, test_user, name="owner-role-guard-group")
     _add_member(test_db, group, test_user, "Owner")
     maintainer = _create_user(test_db, "maintainer", "maintainer@example.com")
     _add_member(test_db, group, maintainer, "Maintainer")
 
     response = test_client.put(
-        f"/api/groups/{group.name}/members/batch/roles",
+        f"/api/groups/{group.name}/members/{test_user.id}",
         headers=_auth_header(test_token),
-        json={
-            "updates": [
-                {"user_id": test_user.id, "role": "Maintainer"},
-                {"user_id": maintainer.id, "role": "Owner"},
-            ]
-        },
+        json={"role": "Maintainer"},
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["total_updated"] == 2
-    assert payload["total_failed"] == 0
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Cannot change role of the current group owner. Transfer ownership first."
+    )
+    assert response.json()["error_code"] == "GROUP_OWNER_ROLE_CHANGE_REQUIRES_TRANSFER"
 
+    test_db.refresh(group)
     owner_member = (
         test_db.query(ResourceMember)
         .filter_by(
@@ -153,7 +150,68 @@ def test_batch_update_group_member_roles_allows_owner_transition_in_one_request(
         )
         .one()
     )
-    assert owner_member.role == "Maintainer"
+    assert group.owner_user_id == test_user.id
+    assert owner_member.role == "Owner"
+    assert promoted_member.role == "Maintainer"
+
+
+def test_batch_update_group_member_roles_rejects_demoting_current_group_owner(
+    test_client: TestClient, test_db: Session, test_user: User, test_token: str
+):
+    group = _create_group(test_db, test_user, name="owner-transition-group")
+    _add_member(test_db, group, test_user, "Owner")
+    maintainer = _create_user(
+        test_db, "batch-maintainer", "batch-maintainer@example.com"
+    )
+    _add_member(test_db, group, maintainer, "Maintainer")
+
+    response = test_client.put(
+        f"/api/groups/{group.name}/members/batch/roles",
+        headers=_auth_header(test_token),
+        json={
+            "updates": [
+                {"user_id": test_user.id, "role": "Maintainer"},
+                {"user_id": maintainer.id, "role": "Owner"},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_updated"] == 1
+    assert payload["total_failed"] == 1
+    assert payload["updated_members"][0]["user_id"] == maintainer.id
+    assert payload["updated_members"][0]["role"] == "Owner"
+    assert payload["failed_updates"] == [
+        {
+            "user_id": test_user.id,
+            "role": "Maintainer",
+            "error": "Cannot change role of the current group owner. Transfer ownership first.",
+            "error_code": "GROUP_OWNER_ROLE_CHANGE_REQUIRES_TRANSFER",
+        }
+    ]
+
+    test_db.refresh(group)
+    owner_member = (
+        test_db.query(ResourceMember)
+        .filter_by(
+            resource_type="Namespace",
+            resource_id=group.id,
+            user_id=test_user.id,
+        )
+        .one()
+    )
+    promoted_member = (
+        test_db.query(ResourceMember)
+        .filter_by(
+            resource_type="Namespace",
+            resource_id=group.id,
+            user_id=maintainer.id,
+        )
+        .one()
+    )
+    assert group.owner_user_id == test_user.id
+    assert owner_member.role == "Owner"
     assert promoted_member.role == "Owner"
 
 
@@ -184,10 +242,15 @@ def test_batch_update_group_member_roles_returns_partial_failures(
     assert payload["updated_members"][0]["user_id"] == developer.id
     assert payload["failed_updates"][0]["user_id"] == 999999
     assert payload["failed_updates"][0]["error"] == "Member not found"
+    assert payload["failed_updates"][0]["error_code"] is None
     assert payload["failed_updates"][1]["user_id"] == test_user.id
     assert (
         payload["failed_updates"][1]["error"]
-        == "Cannot change role of the last owner. Add another owner first."
+        == "Cannot change role of the current group owner. Transfer ownership first."
+    )
+    assert (
+        payload["failed_updates"][1]["error_code"]
+        == "GROUP_OWNER_ROLE_CHANGE_REQUIRES_TRANSFER"
     )
 
     developer_member = (

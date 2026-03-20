@@ -44,7 +44,7 @@ class GroupMemberBatchUpdateRequest(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_unique_user_ids(self):
+    def validate_unique_user_ids(self) -> "GroupMemberBatchUpdateRequest":
         user_ids = [update.user_id for update in self.updates]
         if len(user_ids) != len(set(user_ids)):
             raise ValueError(
@@ -59,6 +59,7 @@ class GroupMemberBatchUpdateFailedItem(BaseModel):
     user_id: int
     role: GroupRole
     error: str
+    error_code: str | None = None
 
 
 class GroupMemberBatchUpdateResponse(BaseModel):

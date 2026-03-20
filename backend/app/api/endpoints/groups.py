@@ -27,6 +27,7 @@ from app.schemas.namespace_member import (
 )
 from app.services import group_service
 from app.services.group_permission import get_effective_role_in_group
+from shared.telemetry.decorators import trace_sync
 
 router = APIRouter()
 
@@ -256,6 +257,7 @@ def add_member_by_username_endpoint(
 
 
 @router.put("/{group_name:path}/members/{user_id}", response_model=GroupMemberResponse)
+@trace_sync("update_group_member_role", "groups.api")
 def update_member_role_endpoint(
     group_name: str = Path(
         ..., description="Group name (may contain slashes for subgroups)"
@@ -290,6 +292,7 @@ def update_member_role_endpoint(
     "/{group_name:path}/members/batch/roles",
     response_model=GroupMemberBatchUpdateResponse,
 )
+@trace_sync("batch_update_group_member_roles", "groups.api")
 def update_member_roles_batch_endpoint(
     group_name: str = Path(
         ..., description="Group name (may contain slashes for subgroups)"

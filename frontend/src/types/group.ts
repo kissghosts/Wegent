@@ -83,6 +83,7 @@ export interface GroupMemberBatchUpdateFailedItem {
   user_id: number
   role: GroupRole
   error: string
+  error_code?: string | null
 }
 
 export interface GroupMemberBatchUpdateResponse {

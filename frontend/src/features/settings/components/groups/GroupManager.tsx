@@ -150,7 +150,6 @@ export function GroupManager({ onGroupsChange }: GroupManagerProps) {
                         onClick={() => handleGroupClick(group)}
                         className="block max-w-[240px] truncate text-left font-medium text-primary transition-colors hover:text-primary/80 hover:underline"
                         title={group.display_name || group.name}
-                        aria-label={t('groups:groupManager.enterGroup')}
                       >
                         {group.display_name || group.name}
                       </button>
@@ -193,6 +192,7 @@ export function GroupManager({ onGroupsChange }: GroupManagerProps) {
                         type="button"
                         onClick={() => handleMembersClick(group)}
                         title={t('groups:groupManager.viewMembers')}
+                        aria-label={`${t('groups:groupManager.viewMembers')} ${group.display_name || group.name}, ${t('groups:groups.members')}: ${group.member_count || 0}`}
                         data-testid={`group-members-button-${group.id}`}
                         className="inline-flex items-center gap-2 rounded-md px-2 py-1 -mx-2 text-text-secondary transition-colors hover:bg-muted hover:text-text-primary"
                       >

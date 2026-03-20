@@ -25,6 +25,7 @@ import {
   inviteAllUsers,
   leaveGroup,
 } from '@/apis/groups'
+import { ApiError } from '@/apis/client'
 import { toast } from 'sonner'
 import type { Group, GroupMember, GroupRole } from '@/types/group'
 import type { SearchUser } from '@/types/api'
@@ -49,12 +50,37 @@ interface GroupMembersDialogProps {
 
 type MemberSortField = 'role' | 'username' | 'joinDate'
 type SortOrder = 'asc' | 'desc'
+type MemberListItem = {
+  member: GroupMember
+  displayedRole: GroupRole
+  roleLabel: string
+}
+
+const GROUP_MEMBER_ERROR_MESSAGE_KEYS: Record<string, string> = {
+  GROUP_OWNER_ROLE_CHANGE_REQUIRES_TRANSFER:
+    'groups:groupMembers.errors.currentOwnerRoleChangeRequiresTransfer',
+}
 
 function getMemberDisplayName(member: GroupMember): string {
   return member.user_name?.trim() || `User ${member.user_id}`
 }
 
-function filterMembers(members: GroupMember[], query: string): GroupMember[] {
+function getGroupMemberErrorMessage(
+  t: (key: string) => string,
+  errorCode?: string | number | null,
+  fallbackMessage?: string
+): string {
+  if (typeof errorCode === 'string') {
+    const translationKey = GROUP_MEMBER_ERROR_MESSAGE_KEYS[errorCode]
+    if (translationKey) {
+      return t(translationKey)
+    }
+  }
+
+  return fallbackMessage || t('groups:groupMembers.updateRoleFailed')
+}
+
+function filterMembers(members: MemberListItem[], query: string): MemberListItem[] {
   const normalizedQuery = query.trim().toLowerCase()
   if (!normalizedQuery) {
     return members
@@ -62,22 +88,23 @@ function filterMembers(members: GroupMember[], query: string): GroupMember[] {
 
   return members.filter(member =>
     [
-      getMemberDisplayName(member),
-      member.invited_by_user_name || '',
-      member.role,
-      String(member.user_id),
+      getMemberDisplayName(member.member),
+      member.member.invited_by_user_name || '',
+      member.displayedRole,
+      member.roleLabel,
+      String(member.member.user_id),
     ].some(value => value.toLowerCase().includes(normalizedQuery))
   )
 }
 
 function sortMembers(
-  members: GroupMember[],
+  members: MemberListItem[],
   sortField: MemberSortField,
   sortOrder: SortOrder
-): GroupMember[] {
+): MemberListItem[] {
   return [...members].sort((left, right) => {
-    const leftName = getMemberDisplayName(left)
-    const rightName = getMemberDisplayName(right)
+    const leftName = getMemberDisplayName(left.member)
+    const rightName = getMemberDisplayName(right.member)
     const nameDiff = leftName.localeCompare(rightName, undefined, {
       numeric: true,
       sensitivity: 'base',
@@ -86,14 +113,17 @@ function sortMembers(
     let comparison = 0
 
     if (sortField === 'username') {
-      comparison = nameDiff || left.user_id - right.user_id
+      comparison = nameDiff || left.member.user_id - right.member.user_id
     } else if (sortField === 'joinDate') {
       comparison =
-        new Date(left.created_at).getTime() - new Date(right.created_at).getTime() ||
+        new Date(left.member.created_at).getTime() - new Date(right.member.created_at).getTime() ||
         nameDiff ||
-        left.user_id - right.user_id
+        left.member.user_id - right.member.user_id
     } else {
-      comparison = compareRoles(right.role, left.role) || nameDiff || left.user_id - right.user_id
+      comparison =
+        compareRoles(right.displayedRole, left.displayedRole) ||
+        nameDiff ||
+        left.member.user_id - right.member.user_id
     }
 
     return sortOrder === 'asc' ? comparison : -comparison
@@ -133,7 +163,19 @@ export function GroupMembersDialog({
   const hasMemberManagementPermission = canAddMember || canRemoveMember || canUpdateRole
   const hasUnsavedRoleChanges = Object.keys(roleDrafts).length > 0
   const editableRoleOptions = myRole === 'Owner' ? BASE_ROLES : ASSIGNABLE_ROLES
-  const visibleMembers = sortMembers(filterMembers(members, searchQuery), sortField, sortOrder)
+  const memberListItems = members.map(member => {
+    const displayedRole = roleDrafts[member.user_id] ?? member.role
+    return {
+      member,
+      displayedRole,
+      roleLabel: t(`groups:groups.roles.${displayedRole}`),
+    }
+  })
+  const visibleMembers = sortMembers(
+    filterMembers(memberListItems, searchQuery),
+    sortField,
+    sortOrder
+  )
 
   useEffect(() => {
     if (isOpen && group) {
@@ -256,6 +298,10 @@ export function GroupMembersDialog({
   }
 
   const handleRoleDraftChange = (member: GroupMember, newRole: GroupRole) => {
+    if (isSavingRoleChanges) {
+      return
+    }
+
     setRoleDrafts(prevDrafts => {
       if (newRole === member.role) {
         const nextDrafts = { ...prevDrafts }
@@ -309,11 +355,19 @@ export function GroupMembersDialog({
       }
 
       if (result.failed_updates.length > 0) {
-        result.failed_updates.forEach(({ user_id, error }) => {
+        result.failed_updates.forEach(({ user_id, error, error_code }) => {
           const memberName =
             members.find(item => item.user_id === user_id)?.user_name || `User ${user_id}`
-          toast.error(`${memberName}: ${error || t('groups:groupMembers.updateRoleFailed')}`)
+          toast.error(`${memberName}: ${getGroupMemberErrorMessage(t, error_code, error)}`)
         })
+      }
+    } catch (error: unknown) {
+      console.error('Failed to save role changes:', error)
+      if (error instanceof ApiError) {
+        toast.error(getGroupMemberErrorMessage(t, error.errorCode, error.message))
+      } else {
+        const err = error as { message?: string }
+        toast.error(err?.message || t('groups:groupMembers.updateRoleFailed'))
       }
     } finally {
       setIsSavingRoleChanges(false)
@@ -624,6 +678,7 @@ export function GroupMembersDialog({
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder={t('groups:groupMembers.searchMembersPlaceholder')}
+            aria-label={t('groups:groupMembers.searchMembersPlaceholder')}
             disabled={loading}
             data-testid="group-members-search-input"
           />
@@ -714,9 +769,8 @@ export function GroupMembersDialog({
                       </td>
                     </tr>
                   )}
-                  {visibleMembers.map(member => {
+                  {visibleMembers.map(({ member, displayedRole }) => {
                     const isMe = member.user_id === currentUserId
-                    const displayedRole = roleDrafts[member.user_id] || member.role
                     const memberIsOwner = isOwner(displayedRole)
                     const hasDraftRoleChange = displayedRole !== member.role
 
@@ -748,9 +802,13 @@ export function GroupMembersDialog({
                           !(myRole === 'Maintainer' && isOwner(member.role)) ? (
                             <Select
                               value={displayedRole}
-                              onValueChange={(value: GroupRole) =>
+                              onValueChange={(value: GroupRole) => {
+                                if (isSavingRoleChanges) {
+                                  return
+                                }
                                 handleRoleDraftChange(member, value)
-                              }
+                              }}
+                              disabled={isSavingRoleChanges}
                             >
                               <SelectTrigger className="h-8 w-[180px]">
                                 <SelectValue

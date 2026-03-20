@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import CustomHTTPException
 from app.models.kind import Kind
 from app.models.namespace import Namespace
 from app.models.resource_member import MemberStatus, ResourceMember
@@ -46,6 +47,10 @@ from app.services.group_permission import (
 
 # Maximum nesting depth for groups
 MAX_GROUP_DEPTH = 5
+CURRENT_GROUP_OWNER_ROLE_CHANGE_ERROR_CODE = "GROUP_OWNER_ROLE_CHANGE_REQUIRES_TRANSFER"
+CURRENT_GROUP_OWNER_ROLE_CHANGE_ERROR = (
+    "Cannot change role of the current group owner. Transfer ownership first."
+)
 
 
 def create_group(
@@ -510,7 +515,7 @@ def _get_group_or_404(db: Session, group_name: str) -> Namespace:
         db.query(Namespace)
         .filter(
             Namespace.name == group_name,
-            Namespace.is_active == True,
+            Namespace.is_active.is_(True),
         )
         .first()
     )
@@ -553,6 +558,22 @@ def _validate_member_role_change(
                 status_code=403,
                 detail="Only Owners can promote members to Owner role",
             )
+
+
+def _validate_current_group_owner_role_change(
+    group: Namespace, member: ResourceMember, new_role: GroupRole
+) -> None:
+    """Reject role changes that would desynchronize the primary group owner."""
+    if (
+        member.user_id == group.owner_user_id
+        and GroupRole(member.role) == GroupRole.Owner
+        and new_role != GroupRole.Owner
+    ):
+        raise CustomHTTPException(
+            status_code=400,
+            detail=CURRENT_GROUP_OWNER_ROLE_CHANGE_ERROR,
+            error_code=CURRENT_GROUP_OWNER_ROLE_CHANGE_ERROR_CODE,
+        )
 
 
 def _get_batch_role_update_priority(
@@ -668,7 +689,7 @@ def update_member_role(
     Raises:
         HTTPException: If member not found or insufficient permissions
     """
-    _get_group_or_404(db, group_name)
+    group = _get_group_or_404(db, group_name)
 
     member = get_group_member(db, group_name, user_id)
 
@@ -677,6 +698,7 @@ def update_member_role(
 
     updater_role = _get_role_updater_role(db, group_name, updated_by_user_id)
     _validate_member_role_change(member, new_role, updater_role)
+    _validate_current_group_owner_role_change(group, member, new_role)
     current_role = GroupRole(member.role)
 
     # Prevent downgrading the last owner
@@ -708,9 +730,9 @@ def update_member_roles_batch(
     Batch update member roles with a single commit.
 
     Owner promotions are applied before Owner demotions so a single batch can
-    safely transfer ownership-like role combinations without transient failures.
+    safely process mixed owner updates without transient last-owner failures.
     """
-    _get_group_or_404(db, group_name)
+    group = _get_group_or_404(db, group_name)
     updater_role = _get_role_updater_role(db, group_name, updated_by_user_id)
 
     namespace_id = get_namespace_id_by_name(db, group_name)
@@ -747,11 +769,13 @@ def update_member_roles_batch(
                 user_id=update.user_id,
                 role=update.role,
                 error="Member not found",
+                error_code=None,
             )
             continue
 
         try:
             _validate_member_role_change(member, update.role, updater_role)
+            _validate_current_group_owner_role_change(group, member, update.role)
 
             current_role = GroupRole(member.role)
             if current_role == GroupRole.Owner and update.role != GroupRole.Owner:
@@ -771,6 +795,7 @@ def update_member_roles_batch(
                 user_id=update.user_id,
                 role=update.role,
                 error=str(exc.detail),
+                error_code=getattr(exc, "error_code", None),
             )
 
     if successful_user_ids:
