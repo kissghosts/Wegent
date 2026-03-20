@@ -116,28 +116,28 @@ export function GroupManager({ onGroupsChange }: GroupManagerProps) {
       ) : (
         <div className="border border-border rounded-lg overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="w-full min-w-[880px]">
               <thead className="bg-muted">
                 <tr>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-text-primary">
+                  <th className="min-w-[240px] px-4 py-3 text-left text-sm font-medium text-text-primary">
                     {t('groups:groups.name')}
                   </th>
                   <th className="px-4 py-3 text-left text-sm font-medium text-text-primary">
-                    {t('groups:groups.groupId')}
+                    {t('groups:groups.description')}
                   </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-text-primary">
+                  <th className="min-w-[110px] px-4 py-3 text-left text-sm font-medium text-text-primary whitespace-nowrap">
                     {t('groups:groups.visibility')}
                   </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-text-primary">
+                  <th className="min-w-[110px] px-4 py-3 text-left text-sm font-medium text-text-primary whitespace-nowrap">
                     {t('groups:groups.level')}
                   </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-text-primary">
+                  <th className="min-w-[120px] px-4 py-3 text-left text-sm font-medium text-text-primary whitespace-nowrap">
                     {t('groups:groups.myRole')}
                   </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-text-primary">
+                  <th className="min-w-[96px] px-4 py-3 text-left text-sm font-medium text-text-primary whitespace-nowrap">
                     {t('groups:groups.members')}
                   </th>
-                  <th className="px-4 py-3 text-right text-sm font-medium text-text-primary">
+                  <th className="w-[120px] min-w-[120px] px-4 py-3 text-center text-sm font-medium text-text-primary">
                     {t('groups:groupMembers.actions')}
                   </th>
                 </tr>
@@ -145,29 +145,41 @@ export function GroupManager({ onGroupsChange }: GroupManagerProps) {
               <tbody className="divide-y divide-border">
                 {groups.map(group => (
                   <tr key={group.id} className="hover:bg-surface">
-                    <td className="px-4 py-3 text-sm">
+                    <td className="min-w-[240px] px-4 py-3 text-sm">
                       <button
                         onClick={() => handleGroupClick(group)}
-                        className="font-medium text-primary hover:text-primary/80 hover:underline transition-colors text-left"
-                        title={t('groups:groupManager.enterGroup')}
+                        className="block max-w-[240px] truncate text-left font-medium text-primary transition-colors hover:text-primary/80 hover:underline"
+                        title={group.display_name || group.name}
+                        aria-label={t('groups:groupManager.enterGroup')}
                       >
                         {group.display_name || group.name}
                       </button>
                     </td>
-                    <td className="px-4 py-3 text-sm text-text-muted font-mono">{group.name}</td>
-                    <td className="px-4 py-3 text-sm">
+                    <td className="px-4 py-3 text-sm text-text-secondary">
+                      {group.description ? (
+                        <span
+                          className="block max-w-[280px] truncate lg:max-w-[360px]"
+                          title={group.description}
+                        >
+                          {group.description}
+                        </span>
+                      ) : (
+                        '-'
+                      )}
+                    </td>
+                    <td className="min-w-[110px] px-4 py-3 text-sm whitespace-nowrap">
                       <Badge variant={group.visibility === 'public' ? 'success' : 'secondary'}>
                         {t(`groups:groups.${group.visibility}`)}
                       </Badge>
                     </td>
-                    <td className="px-4 py-3 text-sm">
+                    <td className="min-w-[110px] px-4 py-3 text-sm whitespace-nowrap">
                       {group.level === 'organization' ? (
                         <Badge variant="default">{t('groups:groups.levels.organization')}</Badge>
                       ) : (
                         <Badge variant="secondary">{t('groups:groups.levels.group')}</Badge>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-sm">
+                    <td className="min-w-[120px] px-4 py-3 text-sm whitespace-nowrap">
                       {group.my_role ? (
                         <Badge variant="secondary">
                           {t(`groups:groups.roles.${group.my_role}`)}
@@ -176,7 +188,7 @@ export function GroupManager({ onGroupsChange }: GroupManagerProps) {
                         '-'
                       )}
                     </td>
-                    <td className="px-4 py-3 text-sm text-text-secondary">
+                    <td className="min-w-[96px] px-4 py-3 text-sm text-text-secondary whitespace-nowrap">
                       <button
                         type="button"
                         onClick={() => handleMembersClick(group)}
@@ -188,8 +200,8 @@ export function GroupManager({ onGroupsChange }: GroupManagerProps) {
                         <span>{group.member_count || 0}</span>
                       </button>
                     </td>
-                    <td className="px-4 py-3 text-sm text-right">
-                      <div className="flex items-center justify-end gap-2">
+                    <td className="w-[120px] min-w-[120px] px-4 py-3 text-sm">
+                      <div className="flex items-center justify-center gap-2">
                         {(group.my_role === 'Owner' || group.my_role === 'Maintainer') && (
                           <Button
                             variant="ghost"
