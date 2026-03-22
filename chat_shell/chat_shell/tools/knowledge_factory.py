@@ -113,9 +113,10 @@ async def prepare_knowledge_base_tools(
             "[knowledge_factory] Created restricted KB tool set: knowledge_base_search only"
         )
     else:
-        # Create shared call counter for exploration tools (kb_ls and kb_head)
-        # These tools share the same max_calls_per_conversation limit as knowledge_base_search
-        # Get the actual limit from kb_tool configuration to ensure consistency
+        # Create shared call counter for exploration tools (kb_ls and kb_head).
+        # knowledge_base_search enforces its own limit internally; we fetch the
+        # same KB-configured max_calls here only because kb_ls/kb_head need a
+        # shared counter when they are actually exposed.
         try:
             max_calls, _ = kb_tool._get_kb_limits()
         except Exception:
@@ -166,17 +167,27 @@ async def prepare_knowledge_base_tools(
         KB_PROMPT_STRICT,
     )
 
-    # Check if any KB has RAG enabled by querying KB info
-    has_rag_enabled = await _check_any_kb_has_rag_enabled(knowledge_base_ids)
-
-    # Choose prompt based on RAG availability and user selection mode
     if restricted_search_only:
         kb_instruction = KB_PROMPT_RESTRICTED_ANALYST
         logger.info(
             "[knowledge_factory] Using RESTRICTED_ANALYST mode prompt "
             "(search-only KB access)"
         )
-    elif not has_rag_enabled:
+        enhanced_system_prompt = f"{base_system_prompt}{kb_instruction}"
+        return KnowledgeBaseToolsResult(
+            extra_tools=extra_tools,
+            enhanced_system_prompt=enhanced_system_prompt,
+            kb_meta_prompt="",
+            kb_tool_access_mode=kb_tool_access_mode,
+        )
+
+    # Check if any KB has RAG enabled by querying KB info
+    has_rag_enabled = await _check_any_kb_has_rag_enabled(
+        knowledge_base_ids, auth_token
+    )
+
+    # Choose prompt based on RAG availability and user selection mode
+    if not has_rag_enabled:
         # No-RAG mode: Use exploration tools only
         kb_instruction = KB_PROMPT_NO_RAG
         logger.info(
@@ -211,7 +222,9 @@ async def prepare_knowledge_base_tools(
     span_name="check_any_kb_has_rag_enabled",
     tracer_name="chat_shell.tools.knowledge_factory",
 )
-async def _check_any_kb_has_rag_enabled(knowledge_base_ids: list[int]) -> bool:
+async def _check_any_kb_has_rag_enabled(
+    knowledge_base_ids: list[int], auth_token: str = ""
+) -> bool:
     """
     Check if any of the given knowledge bases have RAG enabled.
 
@@ -236,6 +249,12 @@ async def _check_any_kb_has_rag_enabled(knowledge_base_ids: list[int]) -> bool:
         import httpx
 
         add_span_event("querying_backend_api")
+        headers = {}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+            set_span_attribute("auth_token_provided", True)
+        else:
+            set_span_attribute("auth_token_provided", False)
 
         # Query KB info from Backend API
         url = f"{settings.BACKEND_URL}/api/internal/rag/kb-size"
@@ -243,6 +262,7 @@ async def _check_any_kb_has_rag_enabled(knowledge_base_ids: list[int]) -> bool:
             response = await client.post(
                 url,
                 json={"knowledge_base_ids": knowledge_base_ids},
+                headers=headers or None,
             )
             response.raise_for_status()
             data = response.json()

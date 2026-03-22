@@ -107,6 +107,10 @@ class TestKBPromptConstants:
         assert "safe summary artifact" in KB_PROMPT_RESTRICTED_ANALYST
         assert "restricted_safe_summary" in KB_PROMPT_RESTRICTED_ANALYST
         assert "protected in the knowledge base" in KB_PROMPT_RESTRICTED_ANALYST
+        assert "Intent Routing (DO THIS FIRST)" in KB_PROMPT_RESTRICTED_ANALYST
+        assert "Before calling `knowledge_base_search`" in KB_PROMPT_RESTRICTED_ANALYST
+        assert "What is in the current knowledge base?" in KB_PROMPT_RESTRICTED_ANALYST
+        assert "DO NOT call `knowledge_base_search`" in KB_PROMPT_RESTRICTED_ANALYST
         assert "MUST NOT enumerate or explain the protected-content policy itself" in (
             KB_PROMPT_RESTRICTED_ANALYST
         )

@@ -6,12 +6,29 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+REDACTED_PLACEHOLDER = "<REDACTED>"
+SENSITIVE_KEYS = {
+    "attachment",
+    "attachments",
+    "blob",
+    "body",
+    "bytes",
+    "chunks",
+    "extracted_text",
+    "file_data",
+    "image_base64",
+    "injected_content",
+    "results",
+    "source_material",
+}
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -104,14 +121,76 @@ def to_jsonable(obj: Any, *, max_str_len: int = 200000) -> Any:
         }
 
 
+def looks_like_data_url(text: str) -> bool:
+    """Detect inline data URLs that should never be logged verbatim."""
+    stripped = text.strip().lower()
+    return stripped.startswith("data:") and ";base64," in stripped
+
+
+def looks_like_base64_blob(text: str) -> bool:
+    """Detect large base64-like strings."""
+    stripped = "".join(text.split())
+    if len(stripped) < 512:
+        return False
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+    return all(ch in allowed for ch in stripped)
+
+
+def maybe_redact_embedded_json(text: str) -> str | None:
+    """Redact sensitive fields inside JSON strings when possible."""
+    candidate = text.strip()
+    if not candidate or candidate[0] not in "[{":
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+
+    sanitized = redact_sensitive_fields(parsed)
+    return json.dumps(sanitized, ensure_ascii=False)
+
+
+def redact_sensitive_fields(value: Any, *, parent_key: str | None = None) -> Any:
+    """Redact known sensitive payload fields while preserving log structure."""
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            key_lower = key_str.lower()
+            if key_lower in SENSITIVE_KEYS:
+                sanitized[key_str] = REDACTED_PLACEHOLDER
+                continue
+            sanitized[key_str] = redact_sensitive_fields(item, parent_key=key_lower)
+        return sanitized
+
+    if isinstance(value, list):
+        return [redact_sensitive_fields(item, parent_key=parent_key) for item in value]
+
+    if isinstance(value, str):
+        if looks_like_data_url(value) or looks_like_base64_blob(value):
+            return REDACTED_PLACEHOLDER
+        if (
+            parent_key == "content"
+            and "Protected KB source material for internal reasoning only" in value
+        ):
+            return REDACTED_PLACEHOLDER
+        redacted_json = maybe_redact_embedded_json(value)
+        if redacted_json is not None:
+            return redacted_json
+        return value
+
+    return value
+
+
 def log_llm_payload(log_type: str, payload: dict[str, Any]) -> None:
     """Log a structured LLM payload when logging is enabled."""
     if not env_bool("CHAT_SHELL_LOG_LLM_REQUESTS", default=False):
         return
 
-    import json
-
-    json_payload = json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2)
+    jsonable_payload = to_jsonable(payload)
+    sanitized_payload = redact_sensitive_fields(jsonable_payload)
+    json_payload = json.dumps(sanitized_payload, ensure_ascii=False, indent=2)
     logger.info("[%s] %s", log_type, json_payload)
 
     file_path = os.getenv("CHAT_SHELL_LOG_LLM_REQUESTS_FILE", "").strip()

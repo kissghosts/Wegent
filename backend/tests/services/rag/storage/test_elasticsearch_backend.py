@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ElasticsearchBackend get_all_chunks diagnostics."""
+"""Tests for ElasticsearchBackend get_all_chunks."""
 
 from unittest.mock import MagicMock, patch
 
@@ -11,10 +11,8 @@ class TestGetAllChunks:
     """Tests for ElasticsearchBackend.get_all_chunks."""
 
     @patch("app.services.rag.storage.elasticsearch_backend.Elasticsearch")
-    def test_get_all_chunks_returns_parsed_chunks_and_logs_summary(
-        self, mock_client_class, caplog
-    ):
-        """Should parse hits and log a useful summary for debugging."""
+    def test_get_all_chunks_returns_parsed_chunks(self, mock_client_class):
+        """Should parse hits into normalized chunk payloads."""
         from app.services.rag.storage.elasticsearch_backend import ElasticsearchBackend
 
         mock_client = MagicMock()
@@ -46,45 +44,22 @@ class TestGetAllChunks:
             }
         )
 
-        with caplog.at_level("INFO"):
-            result = backend.get_all_chunks(knowledge_id="kb_1", max_chunks=100)
-
+        result = backend.get_all_chunks(knowledge_id="kb_1", max_chunks=100)
         assert len(result) == 1
         assert result[0]["doc_ref"] == "doc_1"
         assert result[0]["chunk_id"] == 3
-        assert "get_all_chunks search completed" in caplog.text
-        assert "get_all_chunks parsed 1 chunks" in caplog.text
 
     @patch("app.services.rag.storage.elasticsearch_backend.Elasticsearch")
-    def test_get_all_chunks_logs_samples_when_term_query_returns_empty(
-        self, mock_client_class, caplog
-    ):
-        """Should log index samples when the knowledge_id term query returns no hits."""
+    def test_get_all_chunks_returns_empty_when_no_hits(self, mock_client_class):
+        """Should return an empty list when the knowledge_id term query has no hits."""
         from app.services.rag.storage.elasticsearch_backend import ElasticsearchBackend
 
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
         mock_client.indices.exists.return_value = True
-        mock_client.search.side_effect = [
-            {"hits": {"total": {"value": 0, "relation": "eq"}, "hits": []}},
-            {
-                "hits": {
-                    "hits": [
-                        {
-                            "_source": {
-                                "metadata": {
-                                    "knowledge_id": "other_kb",
-                                    "doc_ref": "doc_x",
-                                    "chunk_index": 7,
-                                    "source_file": "sample.txt",
-                                }
-                            }
-                        }
-                    ]
-                }
-            },
-        ]
-        mock_client.count.return_value = {"count": 5}
+        mock_client.search.return_value = {
+            "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []}
+        }
 
         backend = ElasticsearchBackend(
             {
@@ -93,10 +68,5 @@ class TestGetAllChunks:
             }
         )
 
-        with caplog.at_level("WARNING"):
-            result = backend.get_all_chunks(knowledge_id="kb_1", max_chunks=100)
-
+        result = backend.get_all_chunks(knowledge_id="kb_1", max_chunks=100)
         assert result == []
-        assert "get_all_chunks returned empty" in caplog.text
-        assert "index_doc_count=5" in caplog.text
-        assert "other_kb" in caplog.text

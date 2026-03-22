@@ -1073,9 +1073,7 @@ def _get_user_kb_tool_access_mode(
     Returns:
         Tuple of (access_mode, reason)
     """
-    from app.services.group_permission import (
-        get_knowledge_base_tool_access_mode_by_ids,
-    )
+    from app.services.share import get_knowledge_base_tool_access_mode_by_ids
 
     return get_knowledge_base_tool_access_mode_by_ids(db, user_id, knowledge_base_ids)
 
@@ -1190,6 +1188,7 @@ def _prepare_kb_tools_from_contexts(
     # KB configs (max_calls, exempt_calls, name) are now fetched from Backend API
     kb_tool = KnowledgeBaseTool(
         knowledge_base_ids=knowledge_base_ids,
+        document_ids=document_ids or [],
         user_id=user_id,
         db_session=db,
         user_subtask_id=user_subtask_id,

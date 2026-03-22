@@ -61,17 +61,22 @@ Why dynamic context still exists in restricted mode:
 - minimal information such as KB `name` / `id` still helps tool calls remain stable
 - removing KB context entirely makes knowledge tool usage less reliable
 
-Safe dynamic context should usually keep:
+The current restricted `kb_meta_prompt` keeps only the minimum routing context needed for search:
 
 - KB name
 - KB ID
-- high-level topic or summary labels
+- constrained routing hint
+- constrained routing keywords
 
 It should not include:
 
 - raw source passages
 - definitions that can be restated directly
 - exact targets, KPI values, or document structure
+
+These routing hints exist only to help the main model draft better
+`knowledge_base_search` queries. They must not be surfaced as final answer
+content.
 
 ### Future: weibo_context
 

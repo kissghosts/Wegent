@@ -265,7 +265,10 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             query=query,
             chunks=chunks,
         )
-        if safe_summary.get("decision") == "refuse":
+        if (
+            safe_summary.get("decision") == "refuse"
+            and safe_summary.get("refusal_kind") == "policy"
+        ):
             return self._format_restricted_query_refusal(query)
 
         stats_header = self._build_call_statistics_header(warning_level, len(chunks))
@@ -282,6 +285,8 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             "retrieval_mode": retrieval_mode,
             "stats_header": stats_header,
             "restricted_safe_summary": {
+                "decision": safe_summary.get("decision", "answer"),
+                "reason": safe_summary.get("reason", ""),
                 "summary": safe_summary.get("summary", ""),
                 "observations": safe_summary.get("observations", []),
                 "risks": safe_summary.get("risks", []),
@@ -290,9 +295,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 "confidence": safe_summary.get("confidence", "low"),
             },
             "knowledge_bases": knowledge_bases,
-            "source_count": len(source_references),
-            "sources": source_references,
-            "count": len(chunks),
             "message": (
                 "Protected KB material was analyzed internally and converted into "
                 "a safe high-level summary. Use only this safe summary in the final answer."
@@ -337,13 +339,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             "sources": kb_sources,
         }
         return json.dumps(safe_payload, ensure_ascii=False)
-
-    def _build_backend_headers(self) -> Dict[str, str]:
-        """Build headers for backend HTTP API calls."""
-        headers: Dict[str, str] = {}
-        if self.auth_token:
-            headers["Authorization"] = f"Bearer {self.auth_token}"
-        return headers
 
     def _get_kb_info_sync(self) -> Dict[str, Any]:
         """Get KB info synchronously.
@@ -692,6 +687,17 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 logger.warning(
                     f"[KnowledgeBaseTool] RAG not configured for any KB. KBs: {kb_names}"
                 )
+                if self._is_restricted_search_only():
+                    return json.dumps(
+                        {
+                            "status": "error",
+                            "error_code": "rag_not_configured_search_only",
+                            "message": "RAG retrieval is not available for this knowledge base in restricted search-only mode because no retriever is configured.",
+                            "suggestion": "This restricted session only supports knowledge_base_search. Ask an administrator to enable a retriever for this knowledge base if search is required.",
+                            "knowledge_base_ids": self.knowledge_base_ids,
+                        },
+                        ensure_ascii=False,
+                    )
                 return json.dumps(
                     {
                         "status": "error",
@@ -902,12 +908,10 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             backend_url = getattr(settings, "BACKEND_API_URL", "http://localhost:8000")
 
         try:
-            headers = self._build_backend_headers()
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{backend_url}/api/internal/rag/kb-size",
                     json={"knowledge_base_ids": self.knowledge_base_ids},
-                    headers=headers,
                 )
 
                 if response.status_code == 200:
@@ -1020,13 +1024,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         else:
             backend_url = getattr(settings, "BACKEND_API_URL", "http://localhost:8000")
 
-        headers = self._build_backend_headers()
-        if not headers:
-            logger.warning(
-                "[KnowledgeBaseTool] HTTP all-chunks request has no auth token; "
-                "backend may return 401 for protected internal APIs"
-            )
-
         async with httpx.AsyncClient(timeout=60.0) as client:
             for kb_id in self.knowledge_base_ids:
                 try:
@@ -1041,7 +1038,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     response = await client.post(
                         f"{backend_url}/api/internal/rag/all-chunks",
                         json=payload,
-                        headers=headers,
                     )
 
                     if response.status_code != 200:
@@ -1176,8 +1172,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         else:
             backend_url = getattr(settings, "BACKEND_API_URL", "http://localhost:8000")
 
-        headers = self._build_backend_headers()
-
         async with httpx.AsyncClient(timeout=30.0) as client:
             for kb_id in self.knowledge_base_ids:
                 try:
@@ -1194,7 +1188,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     response = await client.post(
                         f"{backend_url}/api/internal/rag/retrieve",
                         json=payload,
-                        headers=headers,
                     )
 
                     if response.status_code != 200:
@@ -1710,13 +1703,10 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 len(extracted_text or ""),
             )
 
-            headers = self._build_backend_headers()
-
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{backend_url}/api/internal/rag/save-tool-result",
                     json=payload,
-                    headers=headers,
                 )
 
                 logger.info(

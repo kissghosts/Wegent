@@ -235,9 +235,10 @@ class TestKnowledgeFactoryDynamicContext:
             patch(
                 "chat_shell.tools.knowledge_factory._check_any_kb_has_rag_enabled",
                 return_value=True,
-            ),
+            ) as mock_check_rag_enabled,
         ):
             mock_kb_tool_class.return_value = MagicMock()
+            test_auth_token = "jwt-token"
 
             result = await prepare_knowledge_base_tools(
                 knowledge_base_ids=[1],
@@ -248,7 +249,7 @@ class TestKnowledgeFactoryDynamicContext:
                 model_config={"model_id": "claude-3-5-sonnet", "api_key": "k"},
                 skip_prompt_enhancement=False,
                 is_user_selected=True,
-                auth_token="jwt-token",
+                auth_token=test_auth_token,
                 kb_tool_access_mode="restricted_search_only",
             )
 
@@ -256,11 +257,12 @@ class TestKnowledgeFactoryDynamicContext:
             call_kwargs = mock_kb_tool_class.call_args.kwargs
             assert call_kwargs["injection_mode"] == "hybrid"
             assert call_kwargs["tool_access_mode"] == "restricted_search_only"
-            assert call_kwargs["auth_token"] == "jwt-token"
+            assert call_kwargs["auth_token"] == test_auth_token
             assert call_kwargs["summarizer_model_config"] == {
                 "model_id": "claude-3-5-sonnet",
                 "api_key": "k",
             }
+            mock_check_rag_enabled.assert_not_called()
             mock_kb_ls_class.assert_not_called()
             mock_kb_head_class.assert_not_called()
             assert len(result.extra_tools) == 1

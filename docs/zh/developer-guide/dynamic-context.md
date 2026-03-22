@@ -61,17 +61,20 @@ messages.append(current_user_message_with_datetime_suffix)
 - 知识库 `name` / `id` 等最小必要信息，仍然有助于工具调用和对话连贯性
 - 不能因为 restricted 模式就完全丢失知识库上下文，否则工具使用会变得不稳定
 
-这类安全版上下文通常只包含：
+当前 restricted `kb_meta_prompt` 会保留最小必要的检索路由信息：
 
 - 知识库名称
 - 知识库 ID
-- 高层主题或简要说明
+- 受限的 Routing Hint
+- 受限的 Routing Keywords
 
 而不应包含：
 
 - 原文段落
 - 可直接复述的定义
 - 具体目标数字、指标或文档结构
+
+这里的 Routing Hint / Keywords 仅用于帮助主模型生成更合适的 `knowledge_base_search` 查询，不应被当作最终回答内容直接复述。
 
 ### 未来扩展：weibo_context
 

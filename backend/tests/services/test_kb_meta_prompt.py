@@ -64,7 +64,7 @@ class TestKbMetaFormatter:
             == "S"
         )
 
-    def test_format_restricted_kb_meta_prompt_name_and_id_only(self):
+    def test_format_restricted_kb_meta_prompt_includes_safe_routing_hints(self):
         from app.services.chat.preprocessing.kb_meta import (
             format_restricted_kb_meta_prompt,
         )
@@ -85,3 +85,5 @@ class TestKbMetaFormatter:
         assert "KB ID: 1" in prompt
         assert "Summary:" not in prompt
         assert "Topics:" not in prompt
+        assert "Routing Hint: S1" in prompt
+        assert "Routing Keywords: t1, t2" in prompt
