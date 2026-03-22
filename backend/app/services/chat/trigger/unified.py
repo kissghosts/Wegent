@@ -332,6 +332,7 @@ async def _process_contexts(
     if ctx.kb.knowledge_base_ids:
         request.knowledge_base_ids = ctx.kb.knowledge_base_ids
         request.is_user_selected_kb = ctx.kb.is_user_selected_kb
+        request.kb_tool_access_mode = ctx.kb.kb_tool_access_mode
         if ctx.kb.document_ids:
             request.document_ids = ctx.kb.document_ids
 

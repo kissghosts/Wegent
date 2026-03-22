@@ -22,6 +22,7 @@ from dataclasses import asdict
 from typing import Any, Optional
 
 from .execution import ExecutionRequest
+from .knowledge import KnowledgeBaseToolAccessMode
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,7 @@ class OpenAIRequestConverter:
             "knowledge_base_ids": request.knowledge_base_ids,
             "document_ids": request.document_ids,
             "is_user_selected_kb": request.is_user_selected_kb,
+            "kb_tool_access_mode": request.kb_tool_access_mode,
             "table_contexts": request.table_contexts,
             "kb_meta_prompt": request.kb_meta_prompt,
             "task_data": request.task_data,
@@ -311,6 +313,9 @@ class OpenAIRequestConverter:
             knowledge_base_ids=metadata.get("knowledge_base_ids"),
             document_ids=metadata.get("document_ids"),
             is_user_selected_kb=metadata.get("is_user_selected_kb", True),
+            kb_tool_access_mode=metadata.get(
+                "kb_tool_access_mode", KnowledgeBaseToolAccessMode.FULL
+            ),
             table_contexts=metadata.get("table_contexts", []),
             kb_meta_prompt=metadata.get("kb_meta_prompt", "") or "",
             task_data=metadata.get("task_data"),

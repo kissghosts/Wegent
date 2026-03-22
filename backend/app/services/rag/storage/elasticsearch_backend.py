@@ -11,6 +11,7 @@ Supported retrieval modes:
 - hybrid: Combined vector + BM25 search with configurable weights
 """
 
+import logging
 from typing import Any, ClassVar, Dict, List, Optional
 
 from elasticsearch import Elasticsearch
@@ -31,6 +32,8 @@ from app.services.rag.retrieval.filters import parse_metadata_filters
 from app.services.rag.storage.base import BaseStorageBackend
 from app.services.rag.storage.chunk_metadata import ChunkMetadata
 from shared.telemetry.decorators import add_span_event
+
+logger = logging.getLogger(__name__)
 
 
 class ElasticsearchBackend(BaseStorageBackend):
@@ -555,6 +558,7 @@ class ElasticsearchBackend(BaseStorageBackend):
         """
         index_name = self.get_index_name(knowledge_id, **kwargs)
         es_client = Elasticsearch(self.url, **self.es_kwargs)
+        user_id = kwargs.get("user_id")
 
         # Query all chunks for this knowledge base
         search_body = {
@@ -567,11 +571,43 @@ class ElasticsearchBackend(BaseStorageBackend):
         }
 
         try:
+            logger.info(
+                "[Elasticsearch] get_all_chunks start: knowledge_id=%s, index_name=%s, "
+                "max_chunks=%s, size=%s, user_id=%s, index_strategy=%s",
+                knowledge_id,
+                index_name,
+                max_chunks,
+                search_body["size"],
+                user_id,
+                self.index_strategy,
+            )
             # Check if index exists
             if not es_client.indices.exists(index=index_name):
+                logger.warning(
+                    "[Elasticsearch] get_all_chunks index does not exist: "
+                    "knowledge_id=%s, index_name=%s",
+                    knowledge_id,
+                    index_name,
+                )
                 return []
 
             response = es_client.search(index=index_name, body=search_body)
+            total_hits = response.get("hits", {}).get("total", {})
+            if isinstance(total_hits, dict):
+                total_hit_value = total_hits.get("value", 0)
+                total_hit_relation = total_hits.get("relation", "eq")
+            else:
+                total_hit_value = total_hits or 0
+                total_hit_relation = "eq"
+
+            logger.info(
+                "[Elasticsearch] get_all_chunks search completed: knowledge_id=%s, "
+                "index_name=%s, total_hits=%s, relation=%s",
+                knowledge_id,
+                index_name,
+                total_hit_value,
+                total_hit_relation,
+            )
 
             chunks = []
             for hit in response["hits"]["hits"]:
@@ -597,14 +633,86 @@ class ElasticsearchBackend(BaseStorageBackend):
                 if len(chunks) >= max_chunks:
                     break
 
+            if not chunks:
+                index_doc_count = None
+                sample_docs: list[dict[str, Any]] = []
+                try:
+                    count_response = es_client.count(index=index_name)
+                    index_doc_count = count_response.get("count", 0)
+                except Exception as count_error:
+                    logger.warning(
+                        "[Elasticsearch] get_all_chunks failed to count documents: "
+                        "knowledge_id=%s, index_name=%s, error=%s",
+                        knowledge_id,
+                        index_name,
+                        count_error,
+                    )
+
+                try:
+                    sample_response = es_client.search(
+                        index=index_name,
+                        body={
+                            "size": 3,
+                            "query": {"match_all": {}},
+                            "_source": [
+                                "metadata.knowledge_id",
+                                "metadata.doc_ref",
+                                "metadata.chunk_index",
+                                "metadata.source_file",
+                            ],
+                            "sort": [{"_doc": "asc"}],
+                        },
+                    )
+                    for hit in sample_response.get("hits", {}).get("hits", []):
+                        metadata = (hit.get("_source") or {}).get("metadata") or {}
+                        sample_docs.append(
+                            {
+                                "knowledge_id": metadata.get("knowledge_id"),
+                                "doc_ref": metadata.get("doc_ref"),
+                                "chunk_index": metadata.get("chunk_index"),
+                                "source_file": metadata.get("source_file"),
+                            }
+                        )
+                except Exception as sample_error:
+                    logger.warning(
+                        "[Elasticsearch] get_all_chunks failed to fetch sample docs: "
+                        "knowledge_id=%s, index_name=%s, error=%s",
+                        knowledge_id,
+                        index_name,
+                        sample_error,
+                    )
+
+                logger.warning(
+                    "[Elasticsearch] get_all_chunks returned empty: knowledge_id=%s, "
+                    "index_name=%s, term_field=metadata.knowledge_id.keyword, "
+                    "index_doc_count=%s, sample_docs=%s",
+                    knowledge_id,
+                    index_name,
+                    index_doc_count,
+                    sample_docs,
+                )
+            else:
+                sample_chunk = chunks[0]
+                logger.info(
+                    "[Elasticsearch] get_all_chunks parsed %s chunks: knowledge_id=%s, "
+                    "index_name=%s, first_doc_ref=%s, first_chunk_id=%s, first_title=%s",
+                    len(chunks),
+                    knowledge_id,
+                    index_name,
+                    sample_chunk.get("doc_ref"),
+                    sample_chunk.get("chunk_id"),
+                    sample_chunk.get("title"),
+                )
+
             return chunks
 
         except Exception as e:
-            # Log error but return empty list to allow fallback to RAG
-            import logging
-
-            logger = logging.getLogger(__name__)
             logger.warning(
-                f"[Elasticsearch] Failed to get all chunks for KB {knowledge_id}: {e}"
+                "[Elasticsearch] Failed to get all chunks: knowledge_id=%s, "
+                "index_name=%s, search_body=%s, error=%s",
+                knowledge_id,
+                index_name,
+                search_body,
+                e,
             )
             return []

@@ -97,3 +97,26 @@ def format_kb_meta_prompt(kb_meta_list: list[dict[str, Any]]) -> str:
         "Note: This metadata is provided for intent routing (e.g., answering which KBs are selected). "
         "Use the knowledge_base_search tool to retrieve document evidence when needed."
     )
+
+
+def format_restricted_kb_meta_prompt(kb_meta_list: list[dict[str, Any]]) -> str:
+    """Format a restricted KB meta prompt with only safe identifiers."""
+
+    if not kb_meta_list:
+        return ""
+
+    kb_lines: list[str] = []
+    for kb_meta in kb_meta_list:
+        kb_name = kb_meta.get("kb_name", "Unknown")
+        kb_id = kb_meta.get("kb_id", "N/A")
+        kb_lines.append(f"- KB Name: {kb_name}, KB ID: {kb_id}")
+
+    kb_list_str = "\n".join(kb_lines)
+
+    return (
+        "Restricted Knowledge Bases In Scope:\n"
+        f"{kb_list_str}\n\n"
+        "Note: The knowledge_base_search tool is already scoped to these knowledge bases. "
+        "Do not disclose summaries, document structure, filenames, or exact source content. "
+        "Use the tool only for high-level analysis."
+    )

@@ -267,6 +267,14 @@ class TestKnowledgeBaseTool:
             tool, "aggressive_cleaning", None
         )
 
+    def test_build_backend_headers_with_auth_token(self):
+        """Should build bearer auth header for backend HTTP calls."""
+        tool = KnowledgeBaseTool(auth_token="jwt-token")
+
+        headers = tool._build_backend_headers()
+
+        assert headers == {"Authorization": "Bearer jwt-token"}
+
     @pytest.mark.asyncio
     async def test_arun_with_no_knowledge_bases(self):
         """Test _arun with no knowledge bases configured."""
@@ -379,6 +387,87 @@ class TestKnowledgeBaseTool:
         assert result_dict["mode"] == "rag_retrieval"
         assert result_dict["count"] == 2
         assert len(result_dict["sources"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_format_rag_result_redacts_sources_in_restricted_mode(self):
+        """Restricted mode should redact source titles in tool output."""
+        tool = KnowledgeBaseTool(tool_access_mode="restricted_search_only")
+
+        kb_chunks = {
+            1: [
+                {"content": "Content 1", "source": "doc1.txt", "score": 0.8},
+                {"content": "Content 2", "source": "doc2.txt", "score": 0.7},
+            ]
+        }
+
+        result = await tool._format_rag_result(kb_chunks, "test query", 5)
+
+        result_dict = json.loads(result)
+        assert result_dict["results"][0]["source"].startswith("Source ")
+        assert result_dict["results"][0]["content"].startswith(
+            "[Protected KB source material for internal reasoning only]"
+        )
+        assert result_dict["sources"][0]["title"].startswith("Source ")
+        assert "non-extractive" in result_dict["answer_contract"]
+        assert all(
+            not source["title"].endswith(".txt") for source in result_dict["sources"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_restricted_mode_refuses_extractive_query(self):
+        """Restricted mode should refuse exact-definition style requests before retrieval."""
+        tool = KnowledgeBaseTool(
+            tool_access_mode="restricted_search_only",
+            knowledge_base_ids=[1],
+        )
+
+        result = await tool._arun("xx概念是什么")
+
+        result_dict = json.loads(result)
+        assert result_dict["status"] == "refused"
+        assert result_dict["reason"] == "restricted_extractive_query"
+        assert "high-level analysis" in result_dict["suggestion"]
+
+    def test_restricted_mode_allows_analysis_query_with_kpi_terms(self):
+        """Restricted mode should allow high-level KPI design analysis."""
+        tool = KnowledgeBaseTool(tool_access_mode="restricted_search_only")
+
+        assert (
+            tool._is_restricted_extractive_query(
+                "结合知识库，搜索场景应该如何设计符合方向的kpi指标"
+            )
+            is False
+        )
+
+    def test_restricted_mode_refuses_exact_kpi_detail_query(self):
+        """Restricted mode should still refuse exact KPI detail requests."""
+        tool = KnowledgeBaseTool(tool_access_mode="restricted_search_only")
+
+        assert tool._is_restricted_extractive_query("今年搜索业务的考核指标是什么")
+        assert tool._is_restricted_extractive_query("价值用户是什么")
+
+    def test_build_persisted_extracted_text_omits_raw_content_in_restricted_mode(self):
+        """Restricted mode should not persist raw chunk text for future history replay."""
+        tool = KnowledgeBaseTool(tool_access_mode="restricted_search_only")
+
+        chunks = [
+            {
+                "content": "sensitive original content",
+                "source": "Source 1",
+                "score": 0.85,
+                "knowledge_base_id": 1,
+                "source_index": 1,
+            }
+        ]
+        source_references = [{"index": 1, "title": "Source 1", "kb_id": 1}]
+
+        result = tool._build_persisted_extracted_text(chunks, source_references, 1)
+
+        data = json.loads(result)
+        assert data["restricted_mode"] is True
+        assert "original content withheld" in data["message"].lower()
+        assert "content" not in data["chunks"][0]
+        assert "sensitive original content" not in result
 
     def test_build_extracted_data_json_format(self):
         """Test that _build_extracted_data returns JSON with chunks and sources."""

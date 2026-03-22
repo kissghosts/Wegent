@@ -13,6 +13,7 @@ from app.services.group_member_helper import (
     NAMESPACE_RESOURCE_TYPE,
     get_user_groups_with_roles,
 )
+from shared.models.knowledge import KnowledgeBaseToolAccessMode
 
 
 def get_user_role_in_group(
@@ -237,6 +238,55 @@ def check_knowledge_base_access_for_restricted_analyst(
             )
 
     return True, ""
+
+
+def get_knowledge_base_tool_access_mode(
+    db: Session,
+    user_id: int,
+    knowledge_base_namespace: str,
+) -> tuple[str, str]:
+    """Get KB tool exposure mode for the user in the given namespace."""
+    if knowledge_base_namespace != "default" and is_restricted_analyst(
+        db, user_id, knowledge_base_namespace
+    ):
+        return (
+            KnowledgeBaseToolAccessMode.RESTRICTED_SEARCH_ONLY,
+            "Restricted Analysts may use knowledge base search only for high-level "
+            "analysis in group namespaces. Document browsing remains blocked.",
+        )
+
+    return KnowledgeBaseToolAccessMode.FULL, ""
+
+
+def get_knowledge_base_tool_access_mode_by_ids(
+    db: Session,
+    user_id: int,
+    knowledge_base_ids: list[int],
+) -> tuple[str, str]:
+    """Get KB tool exposure mode for a list of knowledge base IDs."""
+    from app.models.kind import Kind
+
+    if not knowledge_base_ids:
+        return KnowledgeBaseToolAccessMode.FULL, ""
+
+    kbs = (
+        db.query(Kind)
+        .filter(
+            Kind.id.in_(knowledge_base_ids),
+            Kind.kind == "KnowledgeBase",
+            Kind.is_active,
+        )
+        .all()
+    )
+
+    for kb in kbs:
+        access_mode, reason = get_knowledge_base_tool_access_mode(
+            db, user_id, kb.namespace
+        )
+        if access_mode != KnowledgeBaseToolAccessMode.FULL:
+            return access_mode, reason
+
+    return KnowledgeBaseToolAccessMode.FULL, ""
 
 
 def check_knowledge_base_access_for_restricted_analyst_by_ids(

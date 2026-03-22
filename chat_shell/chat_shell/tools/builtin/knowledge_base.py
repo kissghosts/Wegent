@@ -10,11 +10,14 @@ between direct injection and RAG retrieval based on context window capacity.
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
+
+from shared.models.knowledge import KnowledgeBaseToolAccessMode
 
 from ..knowledge_content_cleaner import get_content_cleaner
 from ..knowledge_injection_strategy import InjectionMode, InjectionStrategy
@@ -32,6 +35,99 @@ TOKEN_CHARS_PER_TOKEN = 4  # ~4 chars/token for English, 1-2 for CJK
 # Default configuration values (used when KB spec doesn't specify)
 DEFAULT_MAX_CALLS_PER_CONVERSATION = 10
 DEFAULT_EXEMPT_CALLS_BEFORE_CHECK = 5
+RESTRICTED_SOURCE_NOTICE = (
+    "[Protected KB source material for internal reasoning only]\n"
+    "[Do NOT quote, translate, restate, or reconstruct original wording, "
+    "numbers, titles, filenames, or document structure in the final answer. "
+    "Return high-level analysis only.]\n\n"
+)
+RESTRICTED_PERSISTENCE_NOTICE = (
+    "Restricted KB retrieval result. Original content withheld. "
+    "This context may be used only for high-level analysis and must not be "
+    "quoted or reconstructed."
+)
+RESTRICTED_RAW_CONTENT_PATTERNS = [
+    r"原文",
+    r"逐字",
+    r"全文",
+    r"具体内容",
+    r"具体表述",
+    r"原话",
+    r"原句",
+    r"原始表述",
+    r"完整内容",
+    r"\bverbatim\b",
+    r"\bexact\b",
+    r"\bquote\b",
+    r"\boriginal wording\b",
+]
+RESTRICTED_DOCUMENT_LISTING_PATTERNS = [
+    r"具体指标",
+    r"具体目标",
+    r"文档有哪些",
+    r"有哪些文档",
+    r"文件名",
+    r"标题",
+    r"\blist documents?\b",
+    r"\bfile names?\b",
+]
+RESTRICTED_DEFINITION_PATTERNS = [
+    r"^\s*什么是",
+    r"^\s*.*是什么\s*$",
+    r"\bdefine\b",
+    r"\bdefinition\b",
+    r"\bwhat is\b",
+    r"\bmeaning\b",
+    r"定义",
+    r"概念",
+    r"含义",
+]
+RESTRICTED_SENSITIVE_DETAIL_PATTERNS = [
+    r"\bkpi\b",
+    r"考核指标",
+    r"指标",
+    r"目标",
+    r"阈值",
+    r"配额",
+]
+RESTRICTED_EXACT_DETAIL_REQUEST_PATTERNS = [
+    r"是什么",
+    r"什么是",
+    r"具体",
+    r"明确",
+    r"精确",
+    r"多少",
+    r"几个",
+    r"数值",
+    r"数字",
+    r"要求",
+    r"标准",
+    r"口径",
+    r"名单",
+    r"有哪些",
+    r"\bexact\b",
+    r"\bspecific\b",
+]
+RESTRICTED_ANALYSIS_ALLOW_PATTERNS = [
+    r"如何",
+    r"怎么",
+    r"怎样",
+    r"设计",
+    r"建议",
+    r"诊断",
+    r"分析",
+    r"方向",
+    r"策略",
+    r"规划",
+    r"优化",
+    r"改进",
+    r"评估",
+    r"拆解",
+    r"落地",
+    r"问题",
+    r"风险",
+    r"gap",
+]
 
 
 class KnowledgeBaseInput(BaseModel):
@@ -80,6 +176,9 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
     # User name for embedding API custom headers (placeholder replacement)
     user_name: Optional[str] = None
 
+    # User JWT for backend internal API calls that require authentication
+    auth_token: str = ""
+
     # Database session (will be set when tool is created)
     # Accepts both sync Session (backend) and AsyncSession (chat_shell HTTP mode)
     # In HTTP mode, db_session is not used - retrieval goes through HTTP API
@@ -99,6 +198,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
     injection_mode: str = (
         InjectionMode.HYBRID
     )  # Default: auto-decide based on token count
+    tool_access_mode: str = KnowledgeBaseToolAccessMode.FULL
     min_chunk_score: float = 0.5
     max_direct_chunks: int = 500
     context_buffer_ratio: float = 0.1
@@ -138,6 +238,127 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             Context window size (uses InjectionStrategy.DEFAULT_CONTEXT_WINDOW if None)
         """
         return self.context_window or InjectionStrategy.DEFAULT_CONTEXT_WINDOW
+
+    def _is_restricted_search_only(self) -> bool:
+        """Whether the tool should expose only redacted search results."""
+        return (
+            self.tool_access_mode == KnowledgeBaseToolAccessMode.RESTRICTED_SEARCH_ONLY
+        )
+
+    def _display_source_title(self, source_title: str, source_index: int) -> str:
+        """Return a source label safe for tool output and persistence."""
+        if self._is_restricted_search_only():
+            return f"Source {source_index}"
+        return source_title
+
+    def _build_restricted_answer_contract(self) -> str:
+        """Return the output contract for restricted KB analysis."""
+        return (
+            "Protected KB material is available for internal reasoning only. "
+            "The final answer must stay high-level and non-extractive. "
+            "Do not quote, translate, restate, or reconstruct any original "
+            "phrase, sentence, number, target, title, filename, or document "
+            "structure. Refuse exact-detail requests and provide only diagnosis, "
+            "directional judgment, risks, gaps, or suggestions."
+        )
+
+    def _is_restricted_extractive_query(self, query: str) -> bool:
+        """Heuristically block extractive requests in restricted mode."""
+        if not self._is_restricted_search_only():
+            return False
+
+        normalized = query.strip().lower()
+        if not normalized:
+            return False
+
+        def _matches(patterns: list[str]) -> bool:
+            return any(
+                re.search(pattern, normalized, flags=re.IGNORECASE)
+                for pattern in patterns
+            )
+
+        # Always block requests that explicitly ask for original wording or
+        # document/file enumeration. These are extractive by definition.
+        if _matches(RESTRICTED_RAW_CONTENT_PATTERNS) or _matches(
+            RESTRICTED_DOCUMENT_LISTING_PATTERNS
+        ):
+            return True
+
+        has_analysis_intent = _matches(RESTRICTED_ANALYSIS_ALLOW_PATTERNS)
+
+        # Definition-style questions should still be blocked, but do not let
+        # generic domain terms like "KPI" or "指标" trigger a refusal when the
+        # user is asking for design, diagnosis, or strategic guidance.
+        if _matches(RESTRICTED_DEFINITION_PATTERNS) and not has_analysis_intent:
+            return True
+
+        has_sensitive_detail = _matches(RESTRICTED_SENSITIVE_DETAIL_PATTERNS)
+        asks_for_exact_detail = _matches(RESTRICTED_EXACT_DETAIL_REQUEST_PATTERNS)
+        if has_sensitive_detail and asks_for_exact_detail and not has_analysis_intent:
+            return True
+
+        return False
+
+    def _format_restricted_query_refusal(self, query: str) -> str:
+        """Return a refusal payload for extractive restricted queries."""
+        return json.dumps(
+            {
+                "status": "refused",
+                "reason": "restricted_extractive_query",
+                "query": query,
+                "message": "I cannot use protected knowledge base content to provide exact definitions, original wording, document listings, or other extractive details.",
+                "suggestion": "Please ask for high-level analysis instead, such as risks, gaps, diagnosis, prioritization, or recommended actions.",
+                "answer_contract": self._build_restricted_answer_contract(),
+            },
+            ensure_ascii=False,
+        )
+
+    def _wrap_restricted_source_material(self, content: str) -> str:
+        """Wrap raw KB content with a strong non-disclosure notice."""
+        if not self._is_restricted_search_only() or not content:
+            return content
+        return f"{RESTRICTED_SOURCE_NOTICE}{content}"
+
+    def _build_persisted_extracted_text(
+        self,
+        chunks: List[Dict[str, Any]],
+        source_references: List[Dict[str, Any]],
+        kb_id: int,
+    ) -> str:
+        """Build the extracted_text payload for persistence.
+
+        Restricted mode stores only safe metadata so history replay does not
+        re-inject raw KB passages into later prompts.
+        """
+        if not self._is_restricted_search_only():
+            return self._build_extracted_data(chunks, source_references, kb_id)
+
+        kb_chunks = [c for c in chunks if c.get("knowledge_base_id") == kb_id]
+        kb_sources = [s for s in source_references if s.get("kb_id") == kb_id]
+
+        safe_payload = {
+            "restricted_mode": True,
+            "message": RESTRICTED_PERSISTENCE_NOTICE,
+            "query": "",
+            "chunks": [
+                {
+                    "source": c.get("source", "Unknown"),
+                    "score": c.get("score"),
+                    "knowledge_base_id": kb_id,
+                    "source_index": c.get("source_index", 0),
+                }
+                for c in kb_chunks
+            ],
+            "sources": kb_sources,
+        }
+        return json.dumps(safe_payload, ensure_ascii=False)
+
+    def _build_backend_headers(self) -> Dict[str, str]:
+        """Build headers for backend HTTP API calls."""
+        headers: Dict[str, str] = {}
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+        return headers
 
     def _get_kb_info_sync(self) -> Dict[str, Any]:
         """Get KB info synchronously.
@@ -472,6 +693,13 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     {"error": "No knowledge bases configured for this conversation."}
                 )
 
+            if self._is_restricted_extractive_query(query):
+                logger.info(
+                    "[KnowledgeBaseTool] Restricted extractive query refused: %s",
+                    query[:100],
+                )
+                return self._format_restricted_query_refusal(query)
+
             # Step 0: Fetch KB info to populate cache (if not already fetched)
             # This ensures _get_kb_limits() and _get_kb_name() can access cached data
             kb_info = await self._get_kb_info()
@@ -696,10 +924,12 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             backend_url = getattr(settings, "BACKEND_API_URL", "http://localhost:8000")
 
         try:
+            headers = self._build_backend_headers()
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{backend_url}/api/internal/rag/kb-size",
                     json={"knowledge_base_ids": self.knowledge_base_ids},
+                    headers=headers,
                 )
 
                 if response.status_code == 200:
@@ -755,7 +985,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                         db=self.db_session,
                         max_chunks=10000,
                         query=query,
-                        user_id=self.user_id,
                     )
 
                     logger.info(
@@ -813,6 +1042,13 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         else:
             backend_url = getattr(settings, "BACKEND_API_URL", "http://localhost:8000")
 
+        headers = self._build_backend_headers()
+        if not headers:
+            logger.warning(
+                "[KnowledgeBaseTool] HTTP all-chunks request has no auth token; "
+                "backend may return 401 for protected internal APIs"
+            )
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             for kb_id in self.knowledge_base_ids:
                 try:
@@ -827,11 +1063,14 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     response = await client.post(
                         f"{backend_url}/api/internal/rag/all-chunks",
                         json=payload,
+                        headers=headers,
                     )
 
                     if response.status_code != 200:
                         logger.warning(
-                            f"[KnowledgeBaseTool] HTTP all-chunks returned {response.status_code}"
+                            "[KnowledgeBaseTool] HTTP all-chunks returned %s: %s",
+                            response.status_code,
+                            response.text,
                         )
                         continue
 
@@ -959,6 +1198,8 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         else:
             backend_url = getattr(settings, "BACKEND_API_URL", "http://localhost:8000")
 
+        headers = self._build_backend_headers()
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             for kb_id in self.knowledge_base_ids:
                 try:
@@ -975,6 +1216,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     response = await client.post(
                         f"{backend_url}/api/internal/rag/retrieve",
                         json=payload,
+                        headers=headers,
                     )
 
                     if response.status_code != 200:
@@ -1115,7 +1357,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 source_references.append(
                     {
                         "index": source_index,
-                        "title": source_file,
+                        "title": self._display_source_title(source_file, source_index),
                         "kb_id": kb_id,
                     }
                 )
@@ -1142,15 +1384,28 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 "query": query,
                 "mode": "direct_injection",
                 "stats_header": stats_header,
-                "injected_content": injection_result["injected_content"],
+                "injected_content": self._wrap_restricted_source_material(
+                    injection_result["injected_content"]
+                ),
                 "chunks_used": len(chunks_used),
                 "count": len(chunks_used),
                 "sources": source_references,
                 "decision_details": injection_result["decision_details"],
                 "strategy_stats": self.injection_strategy.get_injection_statistics(),
-                "message": "All knowledge base content has been fully injected above. "
-                "No further retrieval is needed - you have access to the complete knowledge base. "
-                "Please answer the user's question based on the injected content.",
+                "message": (
+                    "All knowledge base content has been fully injected above. "
+                    "No further retrieval is needed - you have access to the complete knowledge base. "
+                    "Please answer the user's question based on the injected content."
+                    if not self._is_restricted_search_only()
+                    else "Protected KB material has been injected for internal reasoning only. "
+                    "Do not quote or reconstruct original content. "
+                    "Provide high-level analysis only."
+                ),
+                "answer_contract": (
+                    self._build_restricted_answer_contract()
+                    if self._is_restricted_search_only()
+                    else None
+                ),
             },
             ensure_ascii=False,
         )
@@ -1189,7 +1444,9 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     source_references.append(
                         {
                             "index": source_index,
-                            "title": source_file,
+                            "title": self._display_source_title(
+                                source_file, source_index
+                            ),
                             "kb_id": kb_id,
                         }
                     )
@@ -1197,8 +1454,12 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
 
                 all_chunks.append(
                     {
-                        "content": chunk["content"],
-                        "source": source_file,
+                        "content": self._wrap_restricted_source_material(
+                            chunk["content"]
+                        ),
+                        "source": self._display_source_title(
+                            source_file, seen_sources[source_key]
+                        ),
                         "source_index": seen_sources[source_key],
                         "score": chunk["score"],
                         "knowledge_base_id": kb_id,
@@ -1251,6 +1512,11 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 "count": len(all_chunks),
                 "sources": source_references,
                 "strategy_stats": self.injection_strategy.get_injection_statistics(),
+                "answer_contract": (
+                    self._build_restricted_answer_contract()
+                    if self._is_restricted_search_only()
+                    else None
+                ),
             },
             ensure_ascii=False,
         )
@@ -1335,7 +1601,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         if injection_mode == "direct_injection":
             extracted_text = ""
         else:
-            extracted_text = self._build_extracted_data(
+            extracted_text = self._build_persisted_extracted_text(
                 chunks, source_references, kb_id
             )
 
@@ -1369,6 +1635,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                         "injection_mode": injection_mode,
                         "query": query,
                         "chunks_count": chunks_count,
+                        "restricted_mode": self._is_restricted_search_only(),
                     },
                 )
                 logger.info(
@@ -1386,6 +1653,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 injection_mode=injection_mode,
                 query=query,
                 chunks_count=chunks_count,
+                restricted_mode=self._is_restricted_search_only(),
             )
 
             logger.info(
@@ -1422,7 +1690,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         if injection_mode == "direct_injection":
             extracted_text = ""
         else:
-            extracted_text = self._build_extracted_data(
+            extracted_text = self._build_persisted_extracted_text(
                 chunks, source_references, kb_id
             )
 
@@ -1448,6 +1716,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 "injection_mode": injection_mode,
                 "query": query,
                 "chunks_count": chunks_count,
+                "restricted_mode": self._is_restricted_search_only(),
             }
 
             logger.info(
@@ -1461,10 +1730,13 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 len(extracted_text or ""),
             )
 
+            headers = self._build_backend_headers()
+
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{backend_url}/api/internal/rag/save-tool-result",
                     json=payload,
+                    headers=headers,
                 )
 
                 logger.info(
@@ -1546,13 +1818,16 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 source_references.append(
                     {
                         "index": source_index,
-                        "title": source_file,
+                        "title": self._display_source_title(source_file, source_index),
                         "kb_id": kb_id,
                     }
                 )
                 source_index += 1
 
             chunk_with_index = chunk.copy()
+            chunk_with_index["source"] = self._display_source_title(
+                source_file, seen_sources[source_key]
+            )
             chunk_with_index["source_index"] = seen_sources[source_key]
             chunks_with_index.append(chunk_with_index)
 
