@@ -32,6 +32,7 @@ async def prepare_knowledge_base_tools(
     document_ids: Optional[list[int]] = None,
     model_id: Optional[str] = None,
     context_window: Optional[int] = None,
+    model_config: Optional[dict[str, Any]] = None,
     skip_prompt_enhancement: bool = False,
     user_name: Optional[str] = None,
     auth_token: str = "",
@@ -101,6 +102,7 @@ async def prepare_knowledge_base_tools(
         user_subtask_id=user_subtask_id,
         model_id=model_id or KnowledgeBaseTool.model_id,
         context_window=context_window,
+        summarizer_model_config=model_config or {},
         injection_mode="hybrid",
         tool_access_mode=kb_tool_access_mode,
     )

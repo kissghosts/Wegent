@@ -816,6 +816,7 @@ async def prepare_contexts_for_chat(
     base_system_prompt: str,
     task_id: Optional[int] = None,
     context_window: Optional[int] = None,
+    model_config: Optional[dict[str, Any]] = None,
 ) -> ChatContextsResult:
     """
     Unified context processing based on user_subtask_id.
@@ -838,6 +839,7 @@ async def prepare_contexts_for_chat(
         context_window: Optional model context window size from Model spec.
             Used for selected_documents injection threshold calculation.
             If None, uses default value (128000).
+        model_config: Optional model configuration used by restricted KB safe summary.
 
     Returns:
         ChatContextsResult with processed message, table info, and KB results.
@@ -892,6 +894,7 @@ async def prepare_contexts_for_chat(
         base_system_prompt=base_system_prompt,
         task_id=task_id,
         user_subtask_id=user_subtask_id,
+        model_config=model_config,
     )
 
     extra_tools = kb_result.extra_tools
@@ -1084,6 +1087,7 @@ def _prepare_kb_tools_from_contexts(
     base_system_prompt: str,
     task_id: Optional[int] = None,
     user_subtask_id: Optional[int] = None,
+    model_config: Optional[dict[str, Any]] = None,
 ) -> KnowledgeBaseToolsResult:
     """Prepare knowledge base tools from context records.
 
@@ -1189,6 +1193,7 @@ def _prepare_kb_tools_from_contexts(
         user_id=user_id,
         db_session=db,
         user_subtask_id=user_subtask_id,
+        summarizer_model_config=model_config or {},
         injection_mode="hybrid",
         tool_access_mode=kb_tool_access_mode,
     )

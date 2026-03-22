@@ -10,7 +10,6 @@ between direct injection and RAG retrieval based on context window capacity.
 
 import json
 import logging
-import re
 from typing import Any, Dict, List, Optional
 
 from langchain_core.callbacks import CallbackManagerForToolRun
@@ -21,6 +20,10 @@ from shared.models.knowledge import KnowledgeBaseToolAccessMode
 
 from ..knowledge_content_cleaner import get_content_cleaner
 from ..knowledge_injection_strategy import InjectionMode, InjectionStrategy
+from ..restricted_kb_summary import (
+    build_safe_summary_fallback,
+    summarize_restricted_kb_chunks,
+)
 from .knowledge_base_abc import KnowledgeBaseToolABC
 
 logger = logging.getLogger(__name__)
@@ -46,88 +49,6 @@ RESTRICTED_PERSISTENCE_NOTICE = (
     "This context may be used only for high-level analysis and must not be "
     "quoted or reconstructed."
 )
-RESTRICTED_RAW_CONTENT_PATTERNS = [
-    r"原文",
-    r"逐字",
-    r"全文",
-    r"具体内容",
-    r"具体表述",
-    r"原话",
-    r"原句",
-    r"原始表述",
-    r"完整内容",
-    r"\bverbatim\b",
-    r"\bexact\b",
-    r"\bquote\b",
-    r"\boriginal wording\b",
-]
-RESTRICTED_DOCUMENT_LISTING_PATTERNS = [
-    r"具体指标",
-    r"具体目标",
-    r"文档有哪些",
-    r"有哪些文档",
-    r"文件名",
-    r"标题",
-    r"\blist documents?\b",
-    r"\bfile names?\b",
-]
-RESTRICTED_DEFINITION_PATTERNS = [
-    r"^\s*什么是",
-    r"^\s*.*是什么\s*$",
-    r"\bdefine\b",
-    r"\bdefinition\b",
-    r"\bwhat is\b",
-    r"\bmeaning\b",
-    r"定义",
-    r"概念",
-    r"含义",
-]
-RESTRICTED_SENSITIVE_DETAIL_PATTERNS = [
-    r"\bkpi\b",
-    r"考核指标",
-    r"指标",
-    r"目标",
-    r"阈值",
-    r"配额",
-]
-RESTRICTED_EXACT_DETAIL_REQUEST_PATTERNS = [
-    r"是什么",
-    r"什么是",
-    r"具体",
-    r"明确",
-    r"精确",
-    r"多少",
-    r"几个",
-    r"数值",
-    r"数字",
-    r"要求",
-    r"标准",
-    r"口径",
-    r"名单",
-    r"有哪些",
-    r"\bexact\b",
-    r"\bspecific\b",
-]
-RESTRICTED_ANALYSIS_ALLOW_PATTERNS = [
-    r"如何",
-    r"怎么",
-    r"怎样",
-    r"设计",
-    r"建议",
-    r"诊断",
-    r"分析",
-    r"方向",
-    r"策略",
-    r"规划",
-    r"优化",
-    r"改进",
-    r"评估",
-    r"拆解",
-    r"落地",
-    r"问题",
-    r"风险",
-    r"gap",
-]
 
 
 class KnowledgeBaseInput(BaseModel):
@@ -193,6 +114,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
 
     # Context window size from Model CRD (required for injection strategy)
     context_window: Optional[int] = None
+    summarizer_model_config: Dict[str, Any] = Field(default_factory=dict)
 
     # Injection strategy configuration
     injection_mode: str = (
@@ -262,43 +184,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             "directional judgment, risks, gaps, or suggestions."
         )
 
-    def _is_restricted_extractive_query(self, query: str) -> bool:
-        """Heuristically block extractive requests in restricted mode."""
-        if not self._is_restricted_search_only():
-            return False
-
-        normalized = query.strip().lower()
-        if not normalized:
-            return False
-
-        def _matches(patterns: list[str]) -> bool:
-            return any(
-                re.search(pattern, normalized, flags=re.IGNORECASE)
-                for pattern in patterns
-            )
-
-        # Always block requests that explicitly ask for original wording or
-        # document/file enumeration. These are extractive by definition.
-        if _matches(RESTRICTED_RAW_CONTENT_PATTERNS) or _matches(
-            RESTRICTED_DOCUMENT_LISTING_PATTERNS
-        ):
-            return True
-
-        has_analysis_intent = _matches(RESTRICTED_ANALYSIS_ALLOW_PATTERNS)
-
-        # Definition-style questions should still be blocked, but do not let
-        # generic domain terms like "KPI" or "指标" trigger a refusal when the
-        # user is asking for design, diagnosis, or strategic guidance.
-        if _matches(RESTRICTED_DEFINITION_PATTERNS) and not has_analysis_intent:
-            return True
-
-        has_sensitive_detail = _matches(RESTRICTED_SENSITIVE_DETAIL_PATTERNS)
-        asks_for_exact_detail = _matches(RESTRICTED_EXACT_DETAIL_REQUEST_PATTERNS)
-        if has_sensitive_detail and asks_for_exact_detail and not has_analysis_intent:
-            return True
-
-        return False
-
     def _format_restricted_query_refusal(self, query: str) -> str:
         """Return a refusal payload for extractive restricted queries."""
         return json.dumps(
@@ -318,6 +203,106 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         if not self._is_restricted_search_only() or not content:
             return content
         return f"{RESTRICTED_SOURCE_NOTICE}{content}"
+
+    def _get_kb_name_map(self) -> dict[int, str]:
+        """Return a KB ID -> KB name mapping from cached KB info."""
+
+        kb_info = self._get_kb_info_sync()
+        items = kb_info.get("items", [])
+        kb_name_map: dict[int, str] = {}
+        for item in items:
+            kb_id = item.get("id")
+            if kb_id is None:
+                continue
+            kb_name_map[int(kb_id)] = item.get("name", f"KB-{kb_id}")
+
+        for kb_id in self.knowledge_base_ids:
+            kb_name_map.setdefault(kb_id, f"KB-{kb_id}")
+
+        return kb_name_map
+
+    async def _build_restricted_safe_summary(
+        self,
+        *,
+        query: str,
+        chunks: List[Dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Build a safe summary artifact from protected KB chunks."""
+
+        try:
+            return await summarize_restricted_kb_chunks(
+                model_config=self.summarizer_model_config,
+                query=query,
+                chunks=chunks,
+                kb_name_map=self._get_kb_name_map(),
+            )
+        except Exception as e:
+            logger.error(
+                "[KnowledgeBaseTool] Restricted safe summary generation failed: %s",
+                e,
+                exc_info=True,
+            )
+            return build_safe_summary_fallback(
+                reason="safe_summary_generation_failed",
+                summary=(
+                    "I cannot safely transform the protected knowledge base content right now. "
+                    "Please ask for a high-level diagnostic or try again later."
+                ),
+            )
+
+    async def _format_restricted_safe_summary_result(
+        self,
+        *,
+        query: str,
+        chunks: List[Dict[str, Any]],
+        source_references: List[Dict[str, Any]],
+        warning_level: Optional[str],
+        retrieval_mode: str,
+    ) -> str:
+        """Return a safe-summary payload for restricted mode."""
+
+        safe_summary = await self._build_restricted_safe_summary(
+            query=query,
+            chunks=chunks,
+        )
+        if safe_summary.get("decision") == "refuse":
+            return self._format_restricted_query_refusal(query)
+
+        stats_header = self._build_call_statistics_header(warning_level, len(chunks))
+        kb_name_map = self._get_kb_name_map()
+        knowledge_bases = [
+            {"id": kb_id, "name": kb_name_map.get(kb_id, f"KB-{kb_id}")}
+            for kb_id in sorted({chunk.get("knowledge_base_id") for chunk in chunks})
+            if kb_id is not None
+        ]
+
+        result_payload = {
+            "query": query,
+            "mode": "restricted_safe_summary",
+            "retrieval_mode": retrieval_mode,
+            "stats_header": stats_header,
+            "restricted_safe_summary": {
+                "summary": safe_summary.get("summary", ""),
+                "observations": safe_summary.get("observations", []),
+                "risks": safe_summary.get("risks", []),
+                "recommended_actions": safe_summary.get("recommended_actions", []),
+                "answer_guidance": safe_summary.get("answer_guidance", ""),
+                "confidence": safe_summary.get("confidence", "low"),
+            },
+            "knowledge_bases": knowledge_bases,
+            "source_count": len(source_references),
+            "sources": source_references,
+            "count": len(chunks),
+            "message": (
+                "Protected KB material was analyzed internally and converted into "
+                "a safe high-level summary. Use only this safe summary in the final answer."
+            ),
+            "answer_contract": self._build_restricted_answer_contract(),
+        }
+        self._accumulated_tokens += self._estimate_tokens_from_content(
+            json.dumps(result_payload, ensure_ascii=False)
+        )
+        return json.dumps(result_payload, ensure_ascii=False)
 
     def _build_persisted_extracted_text(
         self,
@@ -693,13 +678,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     {"error": "No knowledge bases configured for this conversation."}
                 )
 
-            if self._is_restricted_extractive_query(query):
-                logger.info(
-                    "[KnowledgeBaseTool] Restricted extractive query refused: %s",
-                    query[:100],
-                )
-                return self._format_restricted_query_refusal(query)
-
             # Step 0: Fetch KB info to populate cache (if not already fetched)
             # This ensures _get_kb_limits() and _get_kb_name() can access cached data
             kb_info = await self._get_kb_info()
@@ -800,7 +778,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     logger.info(
                         f"[KnowledgeBaseTool] Direct injection: {len(injection_result.get('chunks_used', []))} chunks"
                     )
-                    return self._format_direct_injection_result(
+                    return await self._format_direct_injection_result(
                         injection_result, query, warning_level
                     )
                 else:
@@ -1314,7 +1292,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         }
         return json.dumps(extracted_data, ensure_ascii=False)
 
-    def _format_direct_injection_result(
+    async def _format_direct_injection_result(
         self,
         injection_result: Dict[str, Any],
         query: str,
@@ -1332,15 +1310,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         """
         # Extract chunks used for persistence
         chunks_used = injection_result.get("chunks_used", [])
-
-        # Update accumulated tokens (call count already incremented in _arun)
-        injected_content = injection_result.get("injected_content", "")
-        self._accumulated_tokens += self._estimate_tokens_from_content(injected_content)
-
-        # Build call statistics header
-        stats_header = self._build_call_statistics_header(
-            warning_level, len(chunks_used)
-        )
 
         # Build source references from chunks_used
         source_references = []
@@ -1379,6 +1348,24 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 self.knowledge_base_ids,
             )
 
+        if self._is_restricted_search_only():
+            return await self._format_restricted_safe_summary_result(
+                query=query,
+                chunks=chunks_used,
+                source_references=source_references,
+                warning_level=warning_level,
+                retrieval_mode="direct_injection",
+            )
+
+        # Update accumulated tokens (call count already incremented in _arun)
+        injected_content = injection_result.get("injected_content", "")
+        self._accumulated_tokens += self._estimate_tokens_from_content(injected_content)
+
+        # Build call statistics header
+        stats_header = self._build_call_statistics_header(
+            warning_level, len(chunks_used)
+        )
+
         return json.dumps(
             {
                 "query": query,
@@ -1396,15 +1383,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     "All knowledge base content has been fully injected above. "
                     "No further retrieval is needed - you have access to the complete knowledge base. "
                     "Please answer the user's question based on the injected content."
-                    if not self._is_restricted_search_only()
-                    else "Protected KB material has been injected for internal reasoning only. "
-                    "Do not quote or reconstruct original content. "
-                    "Provide high-level analysis only."
-                ),
-                "answer_contract": (
-                    self._build_restricted_answer_contract()
-                    if self._is_restricted_search_only()
-                    else None
                 ),
             },
             ensure_ascii=False,
@@ -1454,9 +1432,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
 
                 all_chunks.append(
                     {
-                        "content": self._wrap_restricted_source_material(
-                            chunk["content"]
-                        ),
+                        "content": chunk["content"],
                         "source": self._display_source_title(
                             source_file, seen_sources[source_key]
                         ),
@@ -1471,15 +1447,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
 
         # Limit total results
         all_chunks = all_chunks[:max_results]
-
-        # Update accumulated tokens (call count already incremented in _arun)
-        total_content = "\n".join([chunk["content"] for chunk in all_chunks])
-        self._accumulated_tokens += self._estimate_tokens_from_content(total_content)
-
-        # Build call statistics header
-        stats_header = self._build_call_statistics_header(
-            warning_level, len(all_chunks)
-        )
 
         logger.info(
             f"[KnowledgeBaseTool] RAG fallback: returning {len(all_chunks)} results with {len(source_references)} unique sources for query: {query}"
@@ -1503,6 +1470,24 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 self.knowledge_base_ids,
             )
 
+        if self._is_restricted_search_only():
+            return await self._format_restricted_safe_summary_result(
+                query=query,
+                chunks=all_chunks,
+                source_references=source_references,
+                warning_level=warning_level,
+                retrieval_mode="rag_retrieval",
+            )
+
+        # Update accumulated tokens (call count already incremented in _arun)
+        total_content = "\n".join([chunk["content"] for chunk in all_chunks])
+        self._accumulated_tokens += self._estimate_tokens_from_content(total_content)
+
+        # Build call statistics header
+        stats_header = self._build_call_statistics_header(
+            warning_level, len(all_chunks)
+        )
+
         return json.dumps(
             {
                 "query": query,
@@ -1512,11 +1497,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 "count": len(all_chunks),
                 "sources": source_references,
                 "strategy_stats": self.injection_strategy.get_injection_statistics(),
-                "answer_contract": (
-                    self._build_restricted_answer_contract()
-                    if self._is_restricted_search_only()
-                    else None
-                ),
             },
             ensure_ascii=False,
         )

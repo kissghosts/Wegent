@@ -319,6 +319,7 @@ async def _process_contexts(
         base_system_prompt=request.system_prompt,
         task_id=request.task_id,
         context_window=model_context_window,
+        model_config=request.model_config,
     )
 
     # Update request with all processed context results.

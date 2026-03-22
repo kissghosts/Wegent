@@ -245,6 +245,7 @@ class TestKnowledgeFactoryDynamicContext:
                 db=MagicMock(),
                 base_system_prompt="Base",
                 model_id="claude-3-5-sonnet",
+                model_config={"model_id": "claude-3-5-sonnet", "api_key": "k"},
                 skip_prompt_enhancement=False,
                 is_user_selected=True,
                 auth_token="jwt-token",
@@ -256,6 +257,10 @@ class TestKnowledgeFactoryDynamicContext:
             assert call_kwargs["injection_mode"] == "hybrid"
             assert call_kwargs["tool_access_mode"] == "restricted_search_only"
             assert call_kwargs["auth_token"] == "jwt-token"
+            assert call_kwargs["summarizer_model_config"] == {
+                "model_id": "claude-3-5-sonnet",
+                "api_key": "k",
+            }
             mock_kb_ls_class.assert_not_called()
             mock_kb_head_class.assert_not_called()
             assert len(result.extra_tools) == 1

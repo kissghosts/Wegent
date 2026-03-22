@@ -352,7 +352,8 @@ class TestKnowledgeBaseTool:
 
                 assert kb_chunks == {}
 
-    def test_format_direct_injection_result(self):
+    @pytest.mark.asyncio
+    async def test_format_direct_injection_result(self):
         """Test _format_direct_injection_result."""
         tool = KnowledgeBaseTool()
 
@@ -362,7 +363,9 @@ class TestKnowledgeBaseTool:
             "decision_details": {"strategy": "all_or_nothing"},
         }
 
-        result = tool._format_direct_injection_result(injection_result, "test query")
+        result = await tool._format_direct_injection_result(
+            injection_result, "test query"
+        )
 
         result_dict = json.loads(result)
         assert result_dict["mode"] == "direct_injection"
@@ -390,8 +393,12 @@ class TestKnowledgeBaseTool:
 
     @pytest.mark.asyncio
     async def test_format_rag_result_redacts_sources_in_restricted_mode(self):
-        """Restricted mode should redact source titles in tool output."""
-        tool = KnowledgeBaseTool(tool_access_mode="restricted_search_only")
+        """Restricted mode should return only a safe summary artifact."""
+        tool = KnowledgeBaseTool(
+            tool_access_mode="restricted_search_only",
+            summarizer_model_config={"model_id": "gpt-test"},
+        )
+        tool._kb_info_cache = {"items": [{"id": 1, "name": "Test KB"}]}
 
         kb_chunks = {
             1: [
@@ -400,51 +407,85 @@ class TestKnowledgeBaseTool:
             ]
         }
 
-        result = await tool._format_rag_result(kb_chunks, "test query", 5)
+        with patch.object(
+            tool,
+            "_build_restricted_safe_summary",
+            new=AsyncMock(
+                return_value={
+                    "decision": "answer",
+                    "summary": "High-level diagnosis",
+                    "observations": ["obs"],
+                    "risks": ["risk"],
+                    "recommended_actions": ["act"],
+                    "answer_guidance": "Use only high-level language.",
+                    "confidence": "medium",
+                }
+            ),
+        ):
+            result = await tool._format_rag_result(kb_chunks, "test query", 5)
 
         result_dict = json.loads(result)
-        assert result_dict["results"][0]["source"].startswith("Source ")
-        assert result_dict["results"][0]["content"].startswith(
-            "[Protected KB source material for internal reasoning only]"
+        assert result_dict["mode"] == "restricted_safe_summary"
+        assert "results" not in result_dict
+        assert "injected_content" not in result_dict
+        assert (
+            result_dict["restricted_safe_summary"]["summary"] == "High-level diagnosis"
         )
         assert result_dict["sources"][0]["title"].startswith("Source ")
         assert "non-extractive" in result_dict["answer_contract"]
-        assert all(
-            not source["title"].endswith(".txt") for source in result_dict["sources"]
-        )
+        assert result_dict["knowledge_bases"] == [{"id": 1, "name": "Test KB"}]
 
     @pytest.mark.asyncio
     async def test_restricted_mode_refuses_extractive_query(self):
-        """Restricted mode should refuse exact-definition style requests before retrieval."""
+        """Restricted mode refusal should come from safe-summary judgment."""
         tool = KnowledgeBaseTool(
             tool_access_mode="restricted_search_only",
-            knowledge_base_ids=[1],
+            summarizer_model_config={"model_id": "gpt-test"},
         )
+        tool._kb_info_cache = {"items": [{"id": 1, "name": "Test KB"}]}
 
-        result = await tool._arun("xx概念是什么")
+        kb_chunks = {
+            1: [
+                {"content": "Sensitive raw content", "source": "doc1.txt", "score": 0.9}
+            ]
+        }
+        with patch.object(
+            tool,
+            "_build_restricted_safe_summary",
+            new=AsyncMock(return_value={"decision": "refuse"}),
+        ):
+            result = await tool._format_rag_result(
+                kb_chunks, "请列出知识库有哪些文档", 5
+            )
 
         result_dict = json.loads(result)
         assert result_dict["status"] == "refused"
         assert result_dict["reason"] == "restricted_extractive_query"
         assert "high-level analysis" in result_dict["suggestion"]
 
-    def test_restricted_mode_allows_analysis_query_with_kpi_terms(self):
-        """Restricted mode should allow high-level KPI design analysis."""
-        tool = KnowledgeBaseTool(tool_access_mode="restricted_search_only")
-
-        assert (
-            tool._is_restricted_extractive_query(
-                "结合知识库，搜索场景应该如何设计符合方向的kpi指标"
-            )
-            is False
+    @pytest.mark.asyncio
+    async def test_restricted_safe_summary_can_refuse_definition_queries(self):
+        """Second-stage safe summary should refuse protected definition requests."""
+        tool = KnowledgeBaseTool(
+            tool_access_mode="restricted_search_only",
+            summarizer_model_config={"model_id": "gpt-test"},
         )
+        tool._kb_info_cache = {"items": [{"id": 1, "name": "Test KB"}]}
 
-    def test_restricted_mode_refuses_exact_kpi_detail_query(self):
-        """Restricted mode should still refuse exact KPI detail requests."""
-        tool = KnowledgeBaseTool(tool_access_mode="restricted_search_only")
+        kb_chunks = {
+            1: [{"content": "Sensitive definition", "source": "doc1.txt", "score": 0.9}]
+        }
 
-        assert tool._is_restricted_extractive_query("今年搜索业务的考核指标是什么")
-        assert tool._is_restricted_extractive_query("价值用户是什么")
+        with patch.object(
+            tool,
+            "_build_restricted_safe_summary",
+            new=AsyncMock(return_value={"decision": "refuse"}),
+        ):
+            result = await tool._format_rag_result(kb_chunks, "价值用户是什么", 5)
+
+        result_dict = json.loads(result)
+        assert result_dict["status"] == "refused"
+        assert result_dict["reason"] == "restricted_extractive_query"
 
     def test_build_persisted_extracted_text_omits_raw_content_in_restricted_mode(self):
         """Restricted mode should not persist raw chunk text for future history replay."""

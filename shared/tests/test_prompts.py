@@ -104,3 +104,9 @@ class TestKBPromptConstants:
         assert "high-level" in KB_PROMPT_RESTRICTED_ANALYST
         assert "protected source material" in KB_PROMPT_RESTRICTED_ANALYST
         assert "MUST NOT quote, translate, restate" in KB_PROMPT_RESTRICTED_ANALYST
+        assert "safe summary artifact" in KB_PROMPT_RESTRICTED_ANALYST
+        assert "restricted_safe_summary" in KB_PROMPT_RESTRICTED_ANALYST
+        assert "protected in the knowledge base" in KB_PROMPT_RESTRICTED_ANALYST
+        assert "MUST NOT enumerate or explain the protected-content policy itself" in (
+            KB_PROMPT_RESTRICTED_ANALYST
+        )
