@@ -28,6 +28,56 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/rag", tags=["internal-rag"])
 
 
+class DirectInjectionRuntimeContext(BaseModel):
+    """Runtime context budget for Backend-side direct injection routing."""
+
+    context_window: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Model context window used for routing decisions",
+    )
+    used_context_tokens: int = Field(
+        default=0,
+        ge=0,
+        description="Approximate tokens already consumed by current conversation messages",
+    )
+    reserved_output_tokens: int = Field(
+        default=4096,
+        ge=0,
+        description="Tokens reserved for the model output",
+    )
+    context_buffer_ratio: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Extra context ratio reserved as safety buffer",
+    )
+    max_direct_chunks: int = Field(
+        default=500,
+        ge=1,
+        description="Maximum chunks allowed for direct injection",
+    )
+
+
+class RetrievePersistenceContext(BaseModel):
+    """Persistence context for Backend-side SubtaskContext updates."""
+
+    user_subtask_id: int = Field(
+        ...,
+        ge=1,
+        description="User subtask ID whose knowledge base context should be updated",
+    )
+    user_id: int = Field(
+        ...,
+        ge=0,
+        description="User ID used when auto-creating the knowledge base context",
+    )
+    restricted_mode: bool = Field(
+        default=False,
+        description="Whether the retrieval ran in restricted search-only mode",
+    )
+
+
 class InternalRetrieveRequest(BaseModel):
     """Simplified retrieve request for internal use."""
 
@@ -44,24 +94,6 @@ class InternalRetrieveRequest(BaseModel):
         default=None,
         description="Optional list of document IDs to filter. Only chunks from these documents will be returned.",
     )
-    context_window: Optional[int] = Field(
-        default=None,
-        description="Model context window used for direct-injection routing",
-    )
-    available_injection_tokens: Optional[int] = Field(
-        default=None,
-        ge=0,
-        description="Runtime token budget still available for direct injection after accounting for current conversation context",
-    )
-    model_id: Optional[str] = Field(
-        default=None,
-        description="Model identifier used to estimate direct-injection token usage",
-    )
-    max_direct_chunks: int = Field(
-        default=500,
-        ge=1,
-        description="Maximum chunks allowed for direct injection routing",
-    )
     route_mode: Literal["auto", "direct_injection", "rag_retrieval"] = Field(
         default="auto",
         description="Routing mode: auto decides in Backend, direct_injection forces all-chunks, rag_retrieval forces standard retrieval",
@@ -69,6 +101,14 @@ class InternalRetrieveRequest(BaseModel):
     user_name: Optional[str] = Field(
         default=None,
         description="User name for placeholder replacement in embedding headers",
+    )
+    runtime_context: Optional[DirectInjectionRuntimeContext] = Field(
+        default=None,
+        description="Runtime context budget used by Backend to decide whether direct injection still fits after accounting for the current conversation state",
+    )
+    persistence_context: Optional[RetrievePersistenceContext] = Field(
+        default=None,
+        description="Optional SubtaskContext persistence metadata handled entirely in Backend",
     )
 
     @model_validator(mode="after")
@@ -132,6 +172,9 @@ async def internal_retrieve(
                 request.document_ids,
             )
 
+        runtime_context = request.runtime_context
+        persistence_context = request.persistence_context
+
         result = await retrieval_service.retrieve_for_chat_shell(
             query=request.query,
             knowledge_base_ids=knowledge_base_ids,
@@ -139,11 +182,27 @@ async def internal_retrieve(
             max_results=request.max_results,
             document_ids=request.document_ids,
             user_name=request.user_name,
-            context_window=request.context_window,
             route_mode=request.route_mode,
-            model_id=request.model_id,
-            available_injection_tokens=request.available_injection_tokens,
-            max_direct_chunks=request.max_direct_chunks,
+            user_id=persistence_context.user_id if persistence_context else None,
+            user_subtask_id=(
+                persistence_context.user_subtask_id if persistence_context else None
+            ),
+            context_window=runtime_context.context_window if runtime_context else None,
+            used_context_tokens=(
+                runtime_context.used_context_tokens if runtime_context else 0
+            ),
+            reserved_output_tokens=(
+                runtime_context.reserved_output_tokens if runtime_context else 4096
+            ),
+            context_buffer_ratio=(
+                runtime_context.context_buffer_ratio if runtime_context else 0.1
+            ),
+            max_direct_chunks=(
+                runtime_context.max_direct_chunks if runtime_context else 500
+            ),
+            restricted_mode=(
+                persistence_context.restricted_mode if persistence_context else False
+            ),
         )
 
         records = result.get("records", [])
@@ -154,13 +213,13 @@ async def internal_retrieve(
 
         logger.info(
             "[internal_rag] Retrieved %d records in mode=%s for KBs %s, "
-            "total_size=%.2fKB, estimated_tokens=%d, available_injection_tokens=%s, query: %s%s",
+            "total_size=%.2fKB, estimated_tokens=%d, used_context_tokens=%s, query: %s%s",
             len(records),
             result.get("mode", "rag_retrieval"),
             knowledge_base_ids,
             total_content_kb,
             result.get("total_estimated_tokens", 0),
-            request.available_injection_tokens,
+            runtime_context.used_context_tokens if runtime_context else None,
             request.query[:50],
             (
                 f", filtered by {len(request.document_ids)} docs"

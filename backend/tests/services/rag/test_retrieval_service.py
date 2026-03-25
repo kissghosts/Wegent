@@ -145,8 +145,9 @@ class TestRetrieveForChatShell:
                 db=db,
                 max_results=5,
                 context_window=10000,
-                available_injection_tokens=1,
-                model_id="claude-3-5-sonnet",
+                used_context_tokens=9990,
+                reserved_output_tokens=0,
+                context_buffer_ratio=0.0,
                 user_id=7,
             )
 
@@ -185,3 +186,99 @@ class TestRetrieveForChatShell:
         assert result["mode"] == "rag_retrieval"
         assert result["records"][0]["score"] == 0.9
         assert result["records"][0]["knowledge_base_id"] == 123
+
+    @pytest.mark.asyncio
+    async def test_force_rag_route_sorts_and_limits_results_globally(self):
+        """Backend should return the final globally ranked RAG records."""
+        from app.services.rag.retrieval_service import RetrievalService
+
+        db = MagicMock()
+        service = RetrievalService()
+        service.retrieve_from_knowledge_base_internal = AsyncMock(
+            side_effect=[
+                {
+                    "records": [
+                        {
+                            "content": "kb1-low",
+                            "score": 0.3,
+                            "title": "doc-1",
+                            "metadata": {"page": 1},
+                        },
+                        {
+                            "content": "kb1-high",
+                            "score": 0.9,
+                            "title": "doc-2",
+                            "metadata": {"page": 2},
+                        },
+                    ]
+                },
+                {
+                    "records": [
+                        {
+                            "content": "kb2-top",
+                            "score": 0.95,
+                            "title": "doc-3",
+                            "metadata": {"page": 3},
+                        }
+                    ]
+                },
+            ]
+        )
+
+        result = await service.retrieve_for_chat_shell(
+            query="test",
+            knowledge_base_ids=[123, 456],
+            db=db,
+            max_results=2,
+            route_mode="rag_retrieval",
+        )
+
+        assert result["mode"] == "rag_retrieval"
+        assert len(result["records"]) == 2
+        assert [record["score"] for record in result["records"]] == [0.95, 0.9]
+        assert [record["knowledge_base_id"] for record in result["records"]] == [
+            456,
+            123,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_persists_retrieve_results_when_subtask_context_is_provided(self):
+        """Backend should own SubtaskContext persistence for chat_shell retrieval."""
+        from app.services.rag.retrieval_service import RetrievalService
+
+        db = MagicMock()
+        service = RetrievalService()
+        service.retrieve_from_knowledge_base_internal = AsyncMock(
+            return_value={
+                "records": [
+                    {
+                        "content": "retrieved",
+                        "score": 0.9,
+                        "title": "doc-1",
+                        "metadata": {"page": 2},
+                    }
+                ]
+            }
+        )
+
+        with patch(
+            "app.services.rag.retrieval_service.retrieval_persistence_service.persist_retrieval_result"
+        ) as mock_persist:
+            result = await service.retrieve_for_chat_shell(
+                query="test",
+                knowledge_base_ids=[123],
+                db=db,
+                max_results=5,
+                route_mode="rag_retrieval",
+                user_id=7,
+                user_subtask_id=8,
+                restricted_mode=True,
+            )
+
+        assert result["mode"] == "rag_retrieval"
+        mock_persist.assert_called_once()
+        persist_kwargs = mock_persist.call_args.kwargs
+        assert persist_kwargs["user_id"] == 7
+        assert persist_kwargs["user_subtask_id"] == 8
+        assert persist_kwargs["restricted_mode"] is True
+        assert persist_kwargs["records"][0]["knowledge_base_id"] == 123

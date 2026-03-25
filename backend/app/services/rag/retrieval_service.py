@@ -17,18 +17,19 @@ from app.services.adapters.retriever_kinds import retriever_kinds_service
 from app.services.knowledge import KnowledgeService
 from app.services.rag.embedding.factory import create_embedding_model_from_crd
 from app.services.rag.retrieval.retriever import DocumentRetriever
+from app.services.rag.retrieval_persistence_service import (
+    retrieval_persistence_service,
+)
 from app.services.rag.storage.base import BaseStorageBackend
 from app.services.rag.storage.factory import create_storage_backend
-from chat_shell.compression.token_counter import TokenCounter
-from chat_shell.tools.knowledge_content_cleaner import get_content_cleaner
 
 logger = logging.getLogger(__name__)
 
 CHAT_SHELL_DIRECT_INJECTION_RATIO = 0.3
 CHAT_SHELL_MAX_ALL_CHUNKS = 10000
 CHAT_SHELL_DEFAULT_MAX_DIRECT_CHUNKS = 500
-CHAT_SHELL_DEFAULT_MODEL_ID = "claude-3-5-sonnet"
 CHAT_SHELL_DIRECT_INJECTION_FORMATTING_OVERHEAD = 50
+CHAT_SHELL_DIRECT_INJECTION_CHARS_PER_TOKEN = 4
 
 
 class RetrievalService:
@@ -97,23 +98,36 @@ class RetrievalService:
     @staticmethod
     def _estimate_direct_injection_tokens(
         records: list[Dict[str, Any]],
-        model_id: Optional[str] = None,
     ) -> int:
-        """Estimate tokens for direct injection using the same token counter path."""
+        """Estimate tokens for direct injection using a stable chars/token heuristic."""
         if not records:
             return 0
 
-        token_counter = TokenCounter(model_id=model_id or CHAT_SHELL_DEFAULT_MODEL_ID)
-        cleaner = get_content_cleaner()
-
         total_tokens = 0
         for record in records:
-            content = cleaner.clean_content(record.get("content", ""))
-            total_tokens += token_counter.count_text(content)
+            content = record.get("content", "") or ""
+            total_tokens += int(
+                len(content) / CHAT_SHELL_DIRECT_INJECTION_CHARS_PER_TOKEN
+            )
 
         return total_tokens + (
             len(records) * CHAT_SHELL_DIRECT_INJECTION_FORMATTING_OVERHEAD
         )
+
+    @staticmethod
+    def _calculate_available_injection_tokens(
+        context_window: Optional[int],
+        used_context_tokens: int,
+        reserved_output_tokens: int,
+        context_buffer_ratio: float,
+    ) -> Optional[int]:
+        """Calculate runtime token budget available for direct injection."""
+        if not context_window or context_window <= 0:
+            return None
+
+        total_available = context_window - used_context_tokens - reserved_output_tokens
+        buffer_space = int(total_available * context_buffer_ratio)
+        return max(0, total_available - buffer_space)
 
     @staticmethod
     def _can_finalize_direct_injection(
@@ -150,9 +164,12 @@ class RetrievalService:
         context_window: Optional[int] = None,
         route_mode: Literal["auto", "direct_injection", "rag_retrieval"] = "auto",
         user_id: Optional[int] = None,
-        model_id: Optional[str] = None,
-        available_injection_tokens: Optional[int] = None,
+        user_subtask_id: Optional[int] = None,
+        used_context_tokens: int = 0,
+        reserved_output_tokens: int = 4096,
+        context_buffer_ratio: float = 0.1,
         max_direct_chunks: int = CHAT_SHELL_DEFAULT_MAX_DIRECT_CHUNKS,
+        restricted_mode: bool = False,
     ) -> Dict[str, Any]:
         """Retrieve KB data for chat_shell with Backend-side routing.
 
@@ -179,14 +196,24 @@ class RetrievalService:
             total_estimated_tokens=total_estimated_tokens,
             route_mode=route_mode,
         )
+        available_injection_tokens = self._calculate_available_injection_tokens(
+            context_window=context_window,
+            used_context_tokens=used_context_tokens,
+            reserved_output_tokens=reserved_output_tokens,
+            context_buffer_ratio=context_buffer_ratio,
+        )
 
         logger.info(
             "[RAG] chat_shell routing: kb_count=%d, route_mode=%s, context_window=%s, "
-            "estimated_tokens=%d, available_injection_tokens=%s, direct_candidate=%s",
+            "estimated_tokens=%d, used_context_tokens=%d, reserved_output_tokens=%d, "
+            "context_buffer_ratio=%.2f, available_injection_tokens=%s, direct_candidate=%s",
             len(knowledge_base_ids),
             route_mode,
             context_window,
             total_estimated_tokens,
+            used_context_tokens,
+            reserved_output_tokens,
+            context_buffer_ratio,
             available_injection_tokens,
             use_direct_injection,
         )
@@ -204,7 +231,6 @@ class RetrievalService:
                     db=db,
                     max_chunks=CHAT_SHELL_MAX_ALL_CHUNKS,
                     query=query,
-                    user_id=user_id,
                 )
                 for chunk in chunks:
                     if (
@@ -223,8 +249,7 @@ class RetrievalService:
                     )
 
             direct_injection_estimated_tokens = self._estimate_direct_injection_tokens(
-                direct_records,
-                model_id=model_id,
+                direct_records
             )
             can_finalize_direct = self._can_finalize_direct_injection(
                 route_mode=route_mode,
@@ -272,7 +297,30 @@ class RetrievalService:
                             "knowledge_base_id": kb_id,
                         }
                     )
+            records.sort(key=lambda x: x.get("score", 0.0) or 0.0, reverse=True)
+            records = records[:max_results]
             mode = "rag_retrieval"
+
+        try:
+            retrieval_persistence_service.persist_retrieval_result(
+                db=db,
+                user_subtask_id=user_subtask_id,
+                user_id=user_id,
+                query=query,
+                mode=mode,
+                records=records,
+                restricted_mode=restricted_mode,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[RAG] Failed to persist retrieve_for_chat_shell result: "
+                "subtask_id=%s, user_id=%s, mode=%s, error=%s",
+                user_subtask_id,
+                user_id,
+                mode,
+                exc,
+                exc_info=True,
+            )
 
         return {
             "mode": mode,

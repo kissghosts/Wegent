@@ -44,11 +44,6 @@ RESTRICTED_SOURCE_NOTICE = (
     "numbers, titles, filenames, or document structure in the final answer. "
     "Return high-level analysis only.]\n\n"
 )
-RESTRICTED_PERSISTENCE_NOTICE = (
-    "Restricted KB retrieval result. Original content withheld. "
-    "This context may be used only for high-level analysis and must not be "
-    "quoted or reconstructed."
-)
 DEFAULT_RESERVED_OUTPUT_TOKENS = 4096
 
 
@@ -306,40 +301,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             json.dumps(result_payload, ensure_ascii=False)
         )
         return json.dumps(result_payload, ensure_ascii=False)
-
-    def _build_persisted_extracted_text(
-        self,
-        chunks: List[Dict[str, Any]],
-        source_references: List[Dict[str, Any]],
-        kb_id: int,
-    ) -> str:
-        """Build the extracted_text payload for persistence.
-
-        Restricted mode stores only safe metadata so history replay does not
-        re-inject raw KB passages into later prompts.
-        """
-        if not self._is_restricted_search_only():
-            return self._build_extracted_data(chunks, source_references, kb_id)
-
-        kb_chunks = [c for c in chunks if c.get("knowledge_base_id") == kb_id]
-        kb_sources = [s for s in source_references if s.get("kb_id") == kb_id]
-
-        safe_payload = {
-            "restricted_mode": True,
-            "message": RESTRICTED_PERSISTENCE_NOTICE,
-            "query": "",
-            "chunks": [
-                {
-                    "source": c.get("source", "Unknown"),
-                    "score": c.get("score"),
-                    "knowledge_base_id": kb_id,
-                    "source_index": c.get("source_index", 0),
-                }
-                for c in kb_chunks
-            ],
-            "sources": kb_sources,
-        }
-        return json.dumps(safe_payload, ensure_ascii=False)
 
     def _get_kb_info_sync(self) -> Dict[str, Any]:
         """Get KB info synchronously.
@@ -891,15 +852,35 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             )
         return kb_chunks
 
-    def _get_available_injection_tokens(
+    def _get_used_context_tokens(self) -> int:
+        """Calculate approximate tokens already used by the current conversation."""
+        return self.injection_strategy.token_counter.count_messages(
+            self.current_messages
+        )
+
+    def _build_runtime_context(
         self,
         reserved_output_tokens: int = DEFAULT_RESERVED_OUTPUT_TOKENS,
-    ) -> int:
-        """Calculate the runtime token budget available for direct injection."""
-        return self.injection_strategy.calculate_available_space(
-            messages=self.current_messages,
-            reserved_output_tokens=reserved_output_tokens,
-        )
+    ) -> Dict[str, Any]:
+        """Build runtime context budget for Backend-side routing."""
+        return {
+            "context_window": self.context_window,
+            "used_context_tokens": self._get_used_context_tokens(),
+            "reserved_output_tokens": reserved_output_tokens,
+            "context_buffer_ratio": self.context_buffer_ratio,
+            "max_direct_chunks": self.max_direct_chunks,
+        }
+
+    def _build_persistence_context(self) -> Optional[Dict[str, Any]]:
+        """Build persistence context for Backend-owned SubtaskContext updates."""
+        if not self.user_subtask_id:
+            return None
+
+        return {
+            "user_subtask_id": self.user_subtask_id,
+            "user_id": self.user_id,
+            "restricted_mode": self._is_restricted_search_only(),
+        }
 
     def _build_backend_direct_injection_result(
         self,
@@ -930,7 +911,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             "decision_details": {
                 "reason": "backend_routed_direct_injection",
                 "chunk_count": len(prepared_chunks),
-                "available_injection_tokens": self._get_available_injection_tokens(),
+                "runtime_context": self._build_runtime_context(),
             },
         }
 
@@ -959,12 +940,15 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     max_results=max_results,
                     document_ids=self.document_ids or None,
                     user_name=self.user_name,
-                    context_window=self.context_window,
                     route_mode=route_mode,
                     user_id=self.user_id,
-                    model_id=self.model_id,
-                    available_injection_tokens=self._get_available_injection_tokens(),
+                    user_subtask_id=self.user_subtask_id,
+                    context_window=self.context_window,
+                    used_context_tokens=self._get_used_context_tokens(),
+                    reserved_output_tokens=DEFAULT_RESERVED_OUTPUT_TOKENS,
+                    context_buffer_ratio=self.context_buffer_ratio,
                     max_direct_chunks=self.max_direct_chunks,
+                    restricted_mode=self._is_restricted_search_only(),
                 )
             except ImportError:
                 result = await self._retrieve_with_strategy_via_http(
@@ -1003,12 +987,12 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             "query": query,
             "knowledge_base_ids": self.knowledge_base_ids,
             "max_results": max_results,
-            "context_window": self.context_window,
             "route_mode": route_mode,
-            "model_id": self.model_id,
-            "available_injection_tokens": self._get_available_injection_tokens(),
-            "max_direct_chunks": self.max_direct_chunks,
+            "runtime_context": self._build_runtime_context(),
         }
+        persistence_context = self._build_persistence_context()
+        if persistence_context:
+            payload["persistence_context"] = persistence_context
         if self.document_ids:
             payload["document_ids"] = self.document_ids
         if self.user_name is not None:
@@ -1040,41 +1024,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             )
             return data
 
-    def _build_extracted_data(
-        self,
-        chunks: List[Dict[str, Any]],
-        source_references: List[Dict[str, Any]],
-        kb_id: int,
-    ) -> str:
-        """Build structured JSON for extracted_text field.
-
-        Args:
-            chunks: List of chunks with content and metadata
-            source_references: List of source references
-            kb_id: Knowledge base ID to filter by
-
-        Returns:
-            JSON string with structured data
-        """
-        # Filter chunks and sources for this KB
-        kb_chunks = [c for c in chunks if c.get("knowledge_base_id") == kb_id]
-        kb_sources = [s for s in source_references if s.get("kb_id") == kb_id]
-
-        extracted_data = {
-            "chunks": [
-                {
-                    "content": c.get("content", ""),
-                    "source": c.get("source", "Unknown"),
-                    "score": c.get("score"),  # None for direct injection
-                    "knowledge_base_id": kb_id,
-                    "source_index": c.get("source_index", 0),
-                }
-                for c in kb_chunks
-            ],
-            "sources": kb_sources,  # [{index, title, kb_id}, ...]
-        }
-        return json.dumps(extracted_data, ensure_ascii=False)
-
     async def _format_direct_injection_result(
         self,
         injection_result: Dict[str, Any],
@@ -1091,7 +1040,7 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
         Returns:
             JSON string with injection result
         """
-        # Extract chunks used for persistence
+        # Extract chunks used for source references and formatted output
         chunks_used = injection_result.get("chunks_used", [])
 
         # Build source references from chunks_used
@@ -1114,22 +1063,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                     }
                 )
                 source_index += 1
-
-        # Persist RAG results if user_subtask_id is available
-        if self.user_subtask_id and chunks_used:
-            logger.info(
-                "[KnowledgeBaseTool] Persist requested (direct_injection): user_subtask_id=%s, chunks=%d, kb_ids=%s",
-                self.user_subtask_id,
-                len(chunks_used),
-                self.knowledge_base_ids,
-            )
-            self._persist_rag_results_sync(chunks_used, query, "direct_injection")
-        elif chunks_used:
-            logger.info(
-                "[KnowledgeBaseTool] Persist skipped (direct_injection): missing user_subtask_id, chunks=%d, kb_ids=%s",
-                len(chunks_used),
-                self.knowledge_base_ids,
-            )
 
         if self._is_restricted_search_only():
             return await self._format_restricted_safe_summary_result(
@@ -1235,24 +1168,6 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             f"[KnowledgeBaseTool] RAG fallback: returning {len(all_chunks)} results with {len(source_references)} unique sources for query: {query}"
         )
 
-        # Persist RAG results if user_subtask_id is available
-        if self.user_subtask_id and all_chunks:
-            logger.info(
-                "[KnowledgeBaseTool] Persist requested (rag_retrieval): user_subtask_id=%s, chunks=%d, sources=%d, kb_ids=%s",
-                self.user_subtask_id,
-                len(all_chunks),
-                len(source_references),
-                self.knowledge_base_ids,
-            )
-            await self._persist_rag_results(all_chunks, source_references, query)
-        elif all_chunks:
-            logger.info(
-                "[KnowledgeBaseTool] Persist skipped (rag_retrieval): missing user_subtask_id, chunks=%d, sources=%d, kb_ids=%s",
-                len(all_chunks),
-                len(source_references),
-                self.knowledge_base_ids,
-            )
-
         if self._is_restricted_search_only():
             return await self._format_restricted_safe_summary_result(
                 query=query,
@@ -1284,376 +1199,18 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
             ensure_ascii=False,
         )
 
-    async def _persist_rag_results(
-        self,
-        all_chunks: List[Dict[str, Any]],
-        source_references: List[Dict[str, Any]],
-        query: str,
-        injection_mode: str = "rag_retrieval",
-    ) -> None:
-        """Persist RAG retrieval results to context database.
-
-        This method saves the retrieved chunks to the SubtaskContext record
-        so that subsequent conversations can include them in history.
-
-        Supports both package mode (direct DB access) and HTTP mode (via API).
-
-        Args:
-            all_chunks: List of retrieved chunks with content and metadata
-            source_references: List of source references with title and kb_id
-            query: Original search query
-            injection_mode: "direct_injection" or "rag_retrieval"
-        """
-        logger.info(
-            "[KnowledgeBaseTool] Persist start: mode=%s, user_subtask_id=%s, total_chunks=%d, total_sources=%d",
-            injection_mode,
-            self.user_subtask_id,
-            len(all_chunks),
-            len(source_references),
-        )
-
-        # Group chunks by knowledge_base_id for per-KB persistence
-        chunks_by_kb: Dict[int, List[Dict[str, Any]]] = {}
-        for chunk in all_chunks:
-            kb_id = chunk.get("knowledge_base_id")
-            if kb_id is not None:
-                if kb_id not in chunks_by_kb:
-                    chunks_by_kb[kb_id] = []
-                chunks_by_kb[kb_id].append(chunk)
-
-        # Try package mode first (direct DB access)
-        try:
-            from app.services.context.context_service import context_service
-
-            # Package mode: use context_service directly
-            for kb_id, chunks in chunks_by_kb.items():
-                await self._persist_rag_result_package_mode(
-                    kb_id, chunks, source_references, query, injection_mode
-                )
-            return
-
-        except ImportError:
-            # HTTP mode: use HTTP API
-            for kb_id, chunks in chunks_by_kb.items():
-                await self._persist_rag_result_http_mode(
-                    kb_id, chunks, source_references, query, injection_mode
-                )
-
-    async def _persist_rag_result_package_mode(
-        self,
-        kb_id: int,
-        chunks: List[Dict[str, Any]],
-        source_references: List[Dict[str, Any]],
-        query: str,
-        injection_mode: str = "rag_retrieval",
-    ) -> None:
-        """Persist RAG result using direct database access (package mode).
-
-        Args:
-            kb_id: Knowledge base ID
-            chunks: Chunks from this knowledge base
-            source_references: Source references
-            query: Original search query
-            injection_mode: "direct_injection" or "rag_retrieval"
-        """
-        import asyncio
-
-        from app.services.context.context_service import context_service
-
-        # Build structured JSON for extracted_text (only for rag_retrieval mode)
-        if injection_mode == "direct_injection":
-            extracted_text = ""
-        else:
-            extracted_text = self._build_persisted_extracted_text(
-                chunks, source_references, kb_id
-            )
-
-        # Filter source references for this KB
-        kb_sources = [s for s in source_references if s.get("kb_id") == kb_id]
-        chunks_count = len(chunks)
-
-        def _persist():
-            # Find context record for this subtask and KB
-            context = context_service.get_knowledge_base_context_by_subtask_and_kb_id(
-                db=self.db_session,
-                subtask_id=self.user_subtask_id,
-                knowledge_id=kb_id,
-            )
-
-            if context is None:
-                # Context doesn't exist - create with result in one operation
-                logger.info(
-                    f"[KnowledgeBaseTool] Context not found, creating new for "
-                    f"subtask_id={self.user_subtask_id}, kb_id={kb_id}"
-                )
-                context = context_service.create_knowledge_base_context_with_result(
-                    db=self.db_session,
-                    subtask_id=self.user_subtask_id,
-                    knowledge_id=kb_id,
-                    user_id=self.user_id,
-                    tool_type="rag",
-                    result_data={
-                        "extracted_text": extracted_text,
-                        "sources": kb_sources,
-                        "injection_mode": injection_mode,
-                        "query": query,
-                        "chunks_count": chunks_count,
-                        "restricted_mode": self._is_restricted_search_only(),
-                    },
-                )
-                logger.info(
-                    f"[KnowledgeBaseTool] Created new context with RAG result: "
-                    f"context_id={context.id}, subtask_id={self.user_subtask_id}, kb_id={kb_id}"
-                )
-                return
-
-            # Update context with RAG results
-            context_service.update_knowledge_base_retrieval_result(
-                db=self.db_session,
-                context_id=context.id,
-                extracted_text=extracted_text,
-                sources=kb_sources,
-                injection_mode=injection_mode,
-                query=query,
-                chunks_count=chunks_count,
-                restricted_mode=self._is_restricted_search_only(),
-            )
-
-            logger.info(
-                f"[KnowledgeBaseTool] Persisted RAG result: context_id={context.id}, "
-                f"subtask_id={self.user_subtask_id}, kb_id={kb_id}, "
-                f"injection_mode={injection_mode}, chunks_count={chunks_count}"
-            )
-
-        # Run synchronous database operation in thread pool
-        await asyncio.to_thread(_persist)
-
-    async def _persist_rag_result_http_mode(
-        self,
-        kb_id: int,
-        chunks: List[Dict[str, Any]],
-        source_references: List[Dict[str, Any]],
-        query: str,
-        injection_mode: str = "rag_retrieval",
-    ) -> None:
-        """Persist RAG result via HTTP API (HTTP mode).
-
-        Args:
-            kb_id: Knowledge base ID
-            chunks: Chunks from this knowledge base
-            source_references: Source references
-            query: Original search query
-            injection_mode: "direct_injection" or "rag_retrieval"
-        """
-        import httpx
-
-        from chat_shell.core.config import settings
-
-        # Build structured JSON for extracted_text (only for rag_retrieval mode)
-        if injection_mode == "direct_injection":
-            extracted_text = ""
-        else:
-            extracted_text = self._build_persisted_extracted_text(
-                chunks, source_references, kb_id
-            )
-
-        # Filter source references for this KB
-        kb_sources = [s for s in source_references if s.get("kb_id") == kb_id]
-        chunks_count = len(chunks)
-
-        # Get backend API URL
-        remote_url = getattr(settings, "REMOTE_STORAGE_URL", "")
-        if remote_url:
-            backend_url = remote_url.replace("/api/internal", "")
-        else:
-            backend_url = getattr(settings, "BACKEND_API_URL", "http://localhost:8000")
-
-        try:
-            payload = {
-                "user_subtask_id": self.user_subtask_id,
-                "knowledge_base_id": kb_id,
-                "user_id": self.user_id,
-                "tool_type": "rag",
-                "extracted_text": extracted_text,
-                "sources": kb_sources,
-                "injection_mode": injection_mode,
-                "query": query,
-                "chunks_count": chunks_count,
-                "restricted_mode": self._is_restricted_search_only(),
-            }
-
-            logger.info(
-                "[KnowledgeBaseTool] Persist HTTP request: url=%s/api/internal/rag/save-tool-result, user_subtask_id=%s, kb_id=%s, injection_mode=%s, chunks_count=%s, sources=%s, extracted_text_len=%s",
-                backend_url,
-                self.user_subtask_id,
-                kb_id,
-                injection_mode,
-                chunks_count,
-                len(kb_sources),
-                len(extracted_text or ""),
-            )
-
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{backend_url}/api/internal/rag/save-tool-result",
-                    json=payload,
-                )
-
-                logger.info(
-                    "[KnowledgeBaseTool] Persist HTTP response: status=%s, kb_id=%s, user_subtask_id=%s",
-                    response.status_code,
-                    kb_id,
-                    self.user_subtask_id,
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("success"):
-                        logger.info(
-                            "[KnowledgeBaseTool] Persisted RAG result via HTTP: context_id=%s, subtask_id=%s, kb_id=%s, injection_mode=%s, chunks_count=%s",
-                            data.get("context_id"),
-                            self.user_subtask_id,
-                            kb_id,
-                            injection_mode,
-                            chunks_count,
-                        )
-                    else:
-                        logger.warning(
-                            "[KnowledgeBaseTool] Persist rejected by backend: kb_id=%s, subtask_id=%s, message=%s",
-                            kb_id,
-                            self.user_subtask_id,
-                            data.get("message"),
-                        )
-                else:
-                    logger.warning(
-                        "[KnowledgeBaseTool] HTTP persist failed: status=%s, kb_id=%s, subtask_id=%s, body=%s",
-                        response.status_code,
-                        kb_id,
-                        self.user_subtask_id,
-                        response.text[:200],
-                    )
-
-        except Exception as e:
-            logger.warning(
-                "[KnowledgeBaseTool] HTTP persist error: kb_id=%s, subtask_id=%s, backend_url=%s, error=%s",
-                kb_id,
-                self.user_subtask_id,
-                backend_url,
-                str(e),
-                exc_info=True,
-            )
-
-    def _persist_rag_results_sync(
-        self,
-        chunks_used: List[Dict[str, Any]],
-        query: str,
-        injection_mode: str = "direct_injection",
-    ) -> None:
-        """Synchronous wrapper for RAG result persistence (used by direct injection).
-
-        Since direct injection mode uses sync methods, we need to handle
-        async persistence differently.
-
-        Args:
-            chunks_used: Chunks used in direct injection
-            query: Original search query
-            injection_mode: "direct_injection" or "rag_retrieval"
-        """
-        import asyncio
-
-        # Build source references from chunks
-        source_references = []
-        seen_sources: dict[tuple[int, str], int] = {}
-        source_index = 1
-
-        # Add source_index to each chunk
-        chunks_with_index = []
-        for chunk in chunks_used:
-            kb_id = chunk.get("knowledge_base_id")
-            source_file = chunk.get("source", "Unknown")
-            source_key = (kb_id, source_file)
-
-            if source_key not in seen_sources:
-                seen_sources[source_key] = source_index
-                source_references.append(
-                    {
-                        "index": source_index,
-                        "title": self._display_source_title(source_file, source_index),
-                        "kb_id": kb_id,
-                    }
-                )
-                source_index += 1
-
-            chunk_with_index = chunk.copy()
-            chunk_with_index["source"] = self._display_source_title(
-                source_file, seen_sources[source_key]
-            )
-            chunk_with_index["source_index"] = seen_sources[source_key]
-            chunks_with_index.append(chunk_with_index)
-
-        # Helper callback to log exceptions from fire-and-forget tasks
-        def _log_task_exception(task: asyncio.Task) -> None:
-            if task.exception():
-                logger.warning(
-                    f"[KnowledgeBaseTool] RAG persistence failed: {task.exception()}"
-                )
-
-        # Try to run async persist in event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If event loop is running, create a task with exception handler
-                task = asyncio.create_task(
-                    self._persist_rag_results(
-                        chunks_with_index, source_references, query, injection_mode
-                    )
-                )
-                task.add_done_callback(_log_task_exception)
-            else:
-                # Run synchronously
-                loop.run_until_complete(
-                    self._persist_rag_results(
-                        chunks_with_index, source_references, query, injection_mode
-                    )
-                )
-        except RuntimeError:
-            # No event loop, create a new one
-            asyncio.run(
-                self._persist_rag_results(
-                    chunks_with_index, source_references, query, injection_mode
-                )
-            )
-
     async def _persist_result(
         self,
         kb_id: int,
         result_data: Dict[str, Any],
     ) -> None:
-        """Implement abstract method from KnowledgeBaseToolABC.
+        """No-op placeholder for the shared KB tool ABC.
 
-        Delegates to the existing _persist_rag_results implementation which
-        handles grouping by KB ID and routing to the appropriate persistence mode.
-
-        Args:
-            kb_id: Knowledge base ID for this result
-            result_data: Tool-specific result data containing:
-                - chunks: List of retrieved chunks
-                - source_references: List of source references
-                - query: Original search query
-                - injection_mode: "direct_injection" or "rag_retrieval"
+        RAG search persistence is handled entirely by Backend retrieval.
+        Other KB tools still implement their own persistence paths.
         """
-        chunks = result_data.get("chunks", [])
-        source_references = result_data.get("source_references", [])
-        query = result_data.get("query", "")
-        injection_mode = result_data.get("injection_mode", "rag_retrieval")
-
-        # Filter chunks for this KB
-        kb_chunks = [c for c in chunks if c.get("knowledge_base_id") == kb_id]
-
-        if not kb_chunks:
-            return
-
-        # Use HTTP mode for single KB persistence
-        await self._persist_rag_result_http_mode(
-            kb_id, kb_chunks, source_references, query, injection_mode
+        logger.debug(
+            "[KnowledgeBaseTool] _persist_result is unused for knowledge_base_search: kb_id=%s, keys=%s",
+            kb_id,
+            sorted(result_data.keys()),
         )

@@ -329,6 +329,8 @@ class TestKnowledgeBaseToolClean:
         tool.current_messages = [{"role": "user", "content": "hello"}]
         tool.context_window = 200000
         tool.model_id = "claude-3-5-sonnet"
+        tool.user_subtask_id = 123
+        tool.user_id = 456
 
         mock_response = MagicMock(status_code=200)
         mock_response.json.return_value = {
@@ -346,9 +348,16 @@ class TestKnowledgeBaseToolClean:
             await tool._retrieve_with_strategy_via_http("test query", 5)
 
         payload = mock_client.post.await_args.kwargs["json"]
-        assert payload["model_id"] == "claude-3-5-sonnet"
-        assert payload["max_direct_chunks"] == tool.max_direct_chunks
-        assert payload["available_injection_tokens"] > 0
+        runtime_context = payload["runtime_context"]
+        assert runtime_context["context_window"] == 200000
+        assert runtime_context["max_direct_chunks"] == tool.max_direct_chunks
+        assert runtime_context["used_context_tokens"] > 0
+        assert runtime_context["reserved_output_tokens"] == 4096
+        assert runtime_context["context_buffer_ratio"] == tool.context_buffer_ratio
+        persistence_context = payload["persistence_context"]
+        assert persistence_context["user_subtask_id"] == 123
+        assert persistence_context["user_id"] == 456
+        assert persistence_context["restricted_mode"] is False
 
     @pytest.mark.asyncio
     async def test_format_direct_injection_result(self):
