@@ -311,9 +311,13 @@ class TestKnowledgeBaseTool:
             }
 
             with patch.object(
-                tool, "_retrieve_chunks_via_http", new_callable=AsyncMock
+                tool, "_retrieve_with_strategy_via_http", new_callable=AsyncMock
             ) as mock_retrieve:
-                mock_retrieve.return_value = {}
+                mock_retrieve.return_value = {
+                    "mode": "rag_retrieval",
+                    "records": [],
+                    "total": 0,
+                }
 
                 result = await tool._arun("test query")
 
@@ -323,26 +327,52 @@ class TestKnowledgeBaseTool:
                 assert result_dict.get("count", 0) == 0
 
     @pytest.mark.asyncio
-    async def test_retrieve_chunks_from_all_kbs_empty(self):
-        """Test _retrieve_chunks_from_all_kbs with empty results."""
+    async def test_backend_routed_retrieval_empty(self):
+        """Test Backend-routed retrieval returns empty grouped chunks."""
         tool = KnowledgeBaseTool()
         tool.knowledge_base_ids = [1]
         tool.db_session = MagicMock()
 
-        # Mock the entire _retrieve_chunks_via_http method to return empty
         with patch.object(
-            tool, "_retrieve_chunks_via_http", new_callable=AsyncMock
-        ) as mock_http:
-            mock_http.return_value = {}
+            tool, "_retrieve_with_strategy_from_all_kbs", new_callable=AsyncMock
+        ) as mock_method:
+            mock_method.return_value = ("rag_retrieval", {})
 
-            # Patch the import to raise ImportError, triggering HTTP fallback
-            with patch.dict(
-                "sys.modules",
-                {"app": None, "app.services": None, "app.services.rag": None},
-            ):
-                kb_chunks = await tool._retrieve_chunks_from_all_kbs("test query", 5)
+            route_mode, kb_chunks = await tool._retrieve_with_strategy_from_all_kbs(
+                "test query", 5
+            )
 
-                assert kb_chunks == {}
+            assert route_mode == "rag_retrieval"
+            assert kb_chunks == {}
+
+    @pytest.mark.asyncio
+    async def test_retrieve_with_strategy_via_http_sends_runtime_budget(self):
+        """HTTP retrieve should send runtime token budget for Backend routing."""
+        tool = KnowledgeBaseTool()
+        tool.knowledge_base_ids = [1]
+        tool.current_messages = [{"role": "user", "content": "hello"}]
+        tool.context_window = 200000
+        tool.model_id = "claude-3-5-sonnet"
+
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {
+            "mode": "rag_retrieval",
+            "records": [],
+            "total": 0,
+        }
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_async_client = AsyncMock()
+        mock_async_client.__aenter__.return_value = mock_client
+        mock_async_client.__aexit__.return_value = None
+
+        with patch("httpx.AsyncClient", return_value=mock_async_client):
+            await tool._retrieve_with_strategy_via_http("test query", 5)
+
+        payload = mock_client.post.await_args.kwargs["json"]
+        assert payload["model_id"] == "claude-3-5-sonnet"
+        assert payload["max_direct_chunks"] == tool.max_direct_chunks
+        assert payload["available_injection_tokens"] > 0
 
     @pytest.mark.asyncio
     async def test_format_direct_injection_result(self):

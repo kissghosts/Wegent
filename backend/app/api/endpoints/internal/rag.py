@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_db
@@ -32,32 +32,70 @@ class InternalRetrieveRequest(BaseModel):
     """Simplified retrieve request for internal use."""
 
     query: str = Field(..., description="Search query")
-    knowledge_base_id: int = Field(..., description="Knowledge base ID")
+    knowledge_base_id: Optional[int] = Field(
+        default=None, description="Single knowledge base ID"
+    )
+    knowledge_base_ids: Optional[list[int]] = Field(
+        default=None,
+        description="Optional list of knowledge base IDs for all-or-nothing routing",
+    )
     max_results: int = Field(default=5, description="Maximum results to return")
     document_ids: Optional[list[int]] = Field(
         default=None,
         description="Optional list of document IDs to filter. Only chunks from these documents will be returned.",
+    )
+    context_window: Optional[int] = Field(
+        default=None,
+        description="Model context window used for direct-injection routing",
+    )
+    available_injection_tokens: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Runtime token budget still available for direct injection after accounting for current conversation context",
+    )
+    model_id: Optional[str] = Field(
+        default=None,
+        description="Model identifier used to estimate direct-injection token usage",
+    )
+    max_direct_chunks: int = Field(
+        default=500,
+        ge=1,
+        description="Maximum chunks allowed for direct injection routing",
+    )
+    route_mode: Literal["auto", "direct_injection", "rag_retrieval"] = Field(
+        default="auto",
+        description="Routing mode: auto decides in Backend, direct_injection forces all-chunks, rag_retrieval forces standard retrieval",
     )
     user_name: Optional[str] = Field(
         default=None,
         description="User name for placeholder replacement in embedding headers",
     )
 
+    @model_validator(mode="after")
+    def validate_knowledge_base_targets(self):
+        """Require at least one KB target and normalize single-id requests."""
+        if self.knowledge_base_id is None and not self.knowledge_base_ids:
+            raise ValueError("knowledge_base_id or knowledge_base_ids is required")
+        return self
+
 
 class RetrieveRecord(BaseModel):
     """Single retrieval result record."""
 
     content: str
-    score: float
+    score: Optional[float] = None
     title: str
     metadata: Optional[dict] = None
+    knowledge_base_id: Optional[int] = None
 
 
 class InternalRetrieveResponse(BaseModel):
     """Response from internal retrieve endpoint."""
 
+    mode: Literal["direct_injection", "rag_retrieval"]
     records: list[RetrieveRecord]
     total: int
+    total_estimated_tokens: int = 0
 
 
 @router.post("/retrieve", response_model=InternalRetrieveResponse)
@@ -83,55 +121,46 @@ async def internal_retrieve(
         from app.services.rag.retrieval_service import RetrievalService
 
         retrieval_service = RetrievalService()
+        knowledge_base_ids = request.knowledge_base_ids or []
+        if request.knowledge_base_id is not None:
+            knowledge_base_ids = [request.knowledge_base_id]
 
-        # Build metadata_condition for document filtering
-        metadata_condition = None
         if request.document_ids:
-            # Convert document IDs to doc_ref format (stored as strings in vector DB)
-            doc_refs = [str(doc_id) for doc_id in request.document_ids]
-            metadata_condition = {
-                "operator": "and",
-                "conditions": [
-                    {
-                        "key": "doc_ref",
-                        "operator": "in",
-                        "value": doc_refs,
-                    }
-                ],
-            }
             logger.info(
                 "[internal_rag] Filtering by %d documents: %s",
                 len(request.document_ids),
                 request.document_ids,
             )
 
-        # Use internal method that bypasses user permission check
-        # Permission is validated at task level before reaching chat_shell
-        result = await retrieval_service.retrieve_from_knowledge_base_internal(
+        result = await retrieval_service.retrieve_for_chat_shell(
             query=request.query,
-            knowledge_base_id=request.knowledge_base_id,
+            knowledge_base_ids=knowledge_base_ids,
             db=db,
-            metadata_condition=metadata_condition,
+            max_results=request.max_results,
+            document_ids=request.document_ids,
             user_name=request.user_name,
+            context_window=request.context_window,
+            route_mode=request.route_mode,
+            model_id=request.model_id,
+            available_injection_tokens=request.available_injection_tokens,
+            max_direct_chunks=request.max_direct_chunks,
         )
 
         records = result.get("records", [])
-        total_records_before_limit = len(records)
 
         # Calculate total content size for logging
         total_content_chars = sum(len(r.get("content", "")) for r in records)
         total_content_kb = total_content_chars / 1024
 
-        # Limit results
-        records = records[: request.max_results]
-
         logger.info(
-            "[internal_rag] Retrieved %d records (limited to %d) for KB %d, "
-            "total_size=%.2fKB , query: %s%s",
-            total_records_before_limit,
+            "[internal_rag] Retrieved %d records in mode=%s for KBs %s, "
+            "total_size=%.2fKB, estimated_tokens=%d, available_injection_tokens=%s, query: %s%s",
             len(records),
-            request.knowledge_base_id,
+            result.get("mode", "rag_retrieval"),
+            knowledge_base_ids,
             total_content_kb,
+            result.get("total_estimated_tokens", 0),
+            request.available_injection_tokens,
             request.query[:50],
             (
                 f", filtered by {len(request.document_ids)} docs"
@@ -141,16 +170,19 @@ async def internal_retrieve(
         )
 
         return InternalRetrieveResponse(
+            mode=result.get("mode", "rag_retrieval"),
             records=[
                 RetrieveRecord(
                     content=r.get("content", ""),
-                    score=r.get("score", 0.0),
+                    score=r.get("score"),
                     title=r.get("title", "Unknown"),
                     metadata=r.get("metadata"),
+                    knowledge_base_id=r.get("knowledge_base_id"),
                 )
                 for r in records
             ],
             total=len(records),
+            total_estimated_tokens=result.get("total_estimated_tokens", 0),
         )
 
     except ValueError as e:

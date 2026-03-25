@@ -326,8 +326,7 @@ class TestKnowledgeBaseToolDirectInjection:
 
     def test_direct_injection_chunks_have_null_score(self):
         """Chunks from direct injection should have null score."""
-        # This tests the behavior when processing all chunks
-        # In _get_all_chunks_from_all_kbs, score should be set to None
+        # Direct injection records do not carry similarity scores.
         chunk = {
             "content": "test",
             "source": "doc.md",
@@ -339,7 +338,7 @@ class TestKnowledgeBaseToolDirectInjection:
 
     def test_rag_retrieval_chunks_have_float_score(self):
         """Chunks from RAG retrieval should have float score."""
-        # In _retrieve_chunks_from_all_kbs, score comes from similarity
+        # RAG retrieval records keep the similarity score from retrieval.
         chunk = {
             "content": "test",
             "source": "doc.md",
@@ -357,7 +356,8 @@ class TestKnowledgeBaseToolSourcesField:
     def setup_method(self):
         self.tool = KnowledgeBaseTool()
 
-    def test_format_direct_injection_result_includes_sources(self):
+    @pytest.mark.asyncio
+    async def test_format_direct_injection_result_includes_sources(self):
         """_format_direct_injection_result should include sources field."""
         injection_result = {
             "mode": "direct_injection",
@@ -382,7 +382,7 @@ class TestKnowledgeBaseToolSourcesField:
             "decision_details": {},
         }
 
-        result_json = self.tool._format_direct_injection_result(
+        result_json = await self.tool._format_direct_injection_result(
             injection_result, "test query"
         )
         result = json.loads(result_json)
@@ -393,7 +393,8 @@ class TestKnowledgeBaseToolSourcesField:
         # Should have 2 unique sources (doc1.md and doc2.md)
         assert len(result["sources"]) == 2
 
-    def test_direct_injection_sources_have_correct_format(self):
+    @pytest.mark.asyncio
+    async def test_direct_injection_sources_have_correct_format(self):
         """Direct injection sources should have index, title, kb_id fields."""
         injection_result = {
             "mode": "direct_injection",
@@ -408,7 +409,7 @@ class TestKnowledgeBaseToolSourcesField:
             "decision_details": {},
         }
 
-        result_json = self.tool._format_direct_injection_result(
+        result_json = await self.tool._format_direct_injection_result(
             injection_result, "test query"
         )
         result = json.loads(result_json)
@@ -423,7 +424,8 @@ class TestKnowledgeBaseToolSourcesField:
         assert source["title"] == "test.md"
         assert source["kb_id"] == 10
 
-    def test_direct_injection_sources_deduplicated(self):
+    @pytest.mark.asyncio
+    async def test_direct_injection_sources_deduplicated(self):
         """Direct injection should deduplicate sources by (kb_id, title)."""
         injection_result = {
             "mode": "direct_injection",
@@ -445,7 +447,7 @@ class TestKnowledgeBaseToolSourcesField:
             "decision_details": {},
         }
 
-        result_json = self.tool._format_direct_injection_result(
+        result_json = await self.tool._format_direct_injection_result(
             injection_result, "test query"
         )
         result = json.loads(result_json)
@@ -457,7 +459,8 @@ class TestKnowledgeBaseToolSourcesField:
         assert (1, "other.md") in titles
         assert (2, "doc.md") in titles
 
-    def test_direct_injection_sources_have_sequential_index(self):
+    @pytest.mark.asyncio
+    async def test_direct_injection_sources_have_sequential_index(self):
         """Direct injection sources should have sequential index starting from 1."""
         injection_result = {
             "mode": "direct_injection",
@@ -470,7 +473,7 @@ class TestKnowledgeBaseToolSourcesField:
             "decision_details": {},
         }
 
-        result_json = self.tool._format_direct_injection_result(
+        result_json = await self.tool._format_direct_injection_result(
             injection_result, "test query"
         )
         result = json.loads(result_json)
@@ -610,7 +613,7 @@ class TestKnowledgeBaseToolSourcesField:
             ],
             "decision_details": {},
         }
-        direct_json = self.tool._format_direct_injection_result(
+        direct_json = await self.tool._format_direct_injection_result(
             injection_result, "query"
         )
         direct_result = json.loads(direct_json)
