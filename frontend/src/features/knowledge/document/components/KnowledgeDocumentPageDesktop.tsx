@@ -12,8 +12,8 @@
 
 'use client'
 
-import { useState, useEffect, useMemo, useCallback } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useSearchParams, useRouter } from 'next/navigation'
 import { FolderOpen } from 'lucide-react'
 import { userApis } from '@/apis/user'
 import { teamService } from '@/features/tasks/service/teamService'
@@ -42,6 +42,7 @@ const SIDEBAR_WIDTH = 280
 
 export function KnowledgeDocumentPageDesktop() {
   const { t } = useTranslation('knowledge')
+  const router = useRouter()
   const searchParams = useSearchParams()
 
   // Knowledge sidebar hook
@@ -173,19 +174,75 @@ export function KnowledgeDocumentPageDesktop() {
     [knowledgeDefaultTeamId]
   )
 
-  // Sync selected KB from URL parameter
+  // Track if initial URL sync has been done
+  const initialUrlSyncDone = useRef(false)
+
+  // Sync selected KB or group from URL parameter on initial load only
+  // This effect only runs once when allKnowledgeBases is loaded
   useEffect(() => {
+    // Skip if already synced or no data loaded yet
+    if (initialUrlSyncDone.current || sidebar.allKnowledgeBases.length === 0) {
+      return
+    }
+
     const kbParam = searchParams.get('kb')
+    const groupParam = searchParams.get('group')
+
     if (kbParam) {
       const kbId = parseInt(kbParam, 10)
-      if (!isNaN(kbId) && kbId !== sidebar.selectedKbId) {
+      if (!isNaN(kbId)) {
         const found = sidebar.allKnowledgeBases.find(kb => kb.id === kbId)
         if (found) {
           sidebar.selectKb(found)
+          initialUrlSyncDone.current = true
         }
       }
+    } else if (groupParam) {
+      // Restore group selection from URL
+      sidebar.selectGroup(groupParam)
+      initialUrlSyncDone.current = true
+    } else {
+      // No URL params, mark as synced
+      initialUrlSyncDone.current = true
     }
-  }, [searchParams, sidebar.allKnowledgeBases, sidebar.selectedKbId, sidebar.selectKb])
+  }, [searchParams, sidebar.allKnowledgeBases, sidebar.selectKb, sidebar.selectGroup])
+
+  // Helper function to update URL parameters
+  const updateUrlParams = useCallback(
+    (params: { kb?: number | null; group?: string | null }) => {
+      const newSearchParams = new URLSearchParams(searchParams.toString())
+
+      // Always preserve type=document
+      newSearchParams.set('type', 'document')
+
+      if (params.kb !== undefined) {
+        if (params.kb === null) {
+          newSearchParams.delete('kb')
+        } else {
+          newSearchParams.set('kb', String(params.kb))
+        }
+      }
+
+      if (params.group !== undefined) {
+        if (params.group === null) {
+          newSearchParams.delete('group')
+        } else {
+          newSearchParams.set('group', params.group)
+        }
+      }
+
+      // When selecting a KB, remove group param; when selecting a group, remove kb param
+      if (params.kb !== undefined && params.kb !== null) {
+        newSearchParams.delete('group')
+      }
+      if (params.group !== undefined && params.group !== null) {
+        newSearchParams.delete('kb')
+      }
+
+      router.replace(`?${newSearchParams.toString()}`, { scroll: false })
+    },
+    [router, searchParams]
+  )
 
   // Helper function to convert KnowledgeBaseWithGroupInfo to KnowledgeBase
   const toKnowledgeBase = useCallback(
@@ -305,28 +362,36 @@ export function KnowledgeDocumentPageDesktop() {
       const fullKb = sidebar.allKnowledgeBases.find(k => k.id === kb.id)
       if (fullKb) {
         sidebar.selectKb(fullKb)
+        // Update URL with kb parameter
+        updateUrlParams({ kb: fullKb.id, group: null })
       }
     },
-    [sidebar]
+    [sidebar, updateUrlParams]
   )
 
   // Handle "All" selection
   const handleSelectAll = useCallback(() => {
     sidebar.selectAll()
-  }, [sidebar])
+    // Clear kb and group params from URL
+    updateUrlParams({ kb: null, group: null })
+  }, [sidebar, updateUrlParams])
 
   // Handle group selection
   const handleSelectGroup = useCallback(
     (groupId: string) => {
       sidebar.selectGroup(groupId)
+      // Update URL with group parameter
+      updateUrlParams({ group: groupId, kb: null })
     },
-    [sidebar]
+    [sidebar, updateUrlParams]
   )
 
   // Handle back from group list
   const handleBackFromGroup = useCallback(() => {
     sidebar.clearSelection()
-  }, [sidebar])
+    // Clear kb and group params from URL
+    updateUrlParams({ kb: null, group: null })
+  }, [sidebar, updateUrlParams])
 
   // Handle create KB from group list
   const handleCreateKbFromGroup = useCallback(
@@ -498,10 +563,27 @@ export function KnowledgeDocumentPageDesktop() {
     [sidebar]
   )
 
+  // Handle "Groups" selection - show all team groups' KBs combined
+  const handleSelectGroups = useCallback(() => {
+    sidebar.selectGroups()
+    // Update URL with groups parameter
+    updateUrlParams({ kb: null, group: 'all-groups' })
+  }, [sidebar, updateUrlParams])
+
   // Handle create KB from "All" page
   const handleCreateKbFromAll = useCallback((kbType: KnowledgeBaseType) => {
     // Show group selector when creating from "All" page
     setCreateScope('personal')
+    setCreateGroupName(undefined)
+    setCreateKbType(kbType)
+    setShowGroupSelector(true)
+    setShowCreateDialog(true)
+  }, [])
+
+  // Handle create KB from "Groups" page
+  const handleCreateKbFromGroups = useCallback((kbType: KnowledgeBaseType) => {
+    // Show group selector when creating from "Groups" page (only team groups)
+    setCreateScope('group')
     setCreateGroupName(undefined)
     setCreateKbType(kbType)
     setShowGroupSelector(true)
@@ -549,8 +631,10 @@ export function KnowledgeDocumentPageDesktop() {
         sidebarGroupId = `group-${groupId}`
       }
       sidebar.selectGroup(sidebarGroupId)
+      // Update URL with group parameter
+      updateUrlParams({ group: sidebarGroupId, kb: null })
     },
-    [sidebar]
+    [sidebar, updateUrlParams]
   )
 
   // Render main content area
@@ -565,6 +649,55 @@ export function KnowledgeDocumentPageDesktop() {
           onEditKb={setEditingKb}
           groupInfo={selectedKbGroupInfo}
           onGroupClick={handleGroupClick}
+        />
+      )
+    }
+
+    // If "Groups" mode is selected, show all team groups' KBs combined
+    if (sidebar.viewMode === 'groups') {
+      // Filter to only show KBs from team groups (type === 'group')
+      const teamGroupKbs = sidebar.allKnowledgeBasesWithGroupInfo.filter(
+        kb => kb.group_type === 'group'
+      )
+
+      return (
+        <KnowledgeGroupListPage
+          groupId={null}
+          groupName={t('document.sidebar.groups', '分组')}
+          knowledgeBases={teamGroupKbs.map(kb => ({
+            id: kb.id,
+            name: kb.name,
+            description: kb.description,
+            user_id: kb.user_id,
+            namespace: kb.namespace,
+            document_count: kb.document_count,
+            is_active: true,
+            summary_enabled: false,
+            kb_type: kb.kb_type || 'notebook',
+            max_calls_per_conversation: 10,
+            exempt_calls_before_check: 5,
+            created_at: kb.created_at,
+            updated_at: kb.updated_at,
+          }))}
+          knowledgeBasesWithGroupInfo={teamGroupKbs}
+          isLoading={sidebar.isGroupsLoading}
+          onSelectKb={handleSelectKb}
+          onCreateKb={handleCreateKbFromGroups}
+          onEditKb={kb => {
+            const fullKb = sidebar.allKnowledgeBases.find(k => k.id === kb.id)
+            if (fullKb) setEditingKb(fullKb)
+          }}
+          onDeleteKb={kb => {
+            const fullKb = sidebar.allKnowledgeBases.find(k => k.id === kb.id)
+            if (fullKb) setDeletingKb(fullKb)
+          }}
+          onToggleFavorite={handleToggleFavorite}
+          isFavorite={isFavorite}
+          getKbGroupInfo={sidebar.getKbGroupInfo}
+          isAllMode={true}
+          filterGroupId={sidebar.filterGroupId}
+          onFilterGroupChange={sidebar.setFilterGroupId}
+          availableGroups={availableGroups.filter(g => g.id.startsWith('group-'))}
         />
       )
     }
@@ -604,11 +737,26 @@ export function KnowledgeDocumentPageDesktop() {
       // Check if this is personal mode
       const isPersonalMode = selectedGroup.type === 'personal'
 
+      // Filter KBs with group info for this specific group to get my_role
+      const groupKbsWithInfo = sidebar.allKnowledgeBasesWithGroupInfo.filter(kb => {
+        if (selectedGroup.type === 'personal') {
+          return kb.group_type === 'personal'
+        } else if (selectedGroup.type === 'organization') {
+          return kb.group_type === 'organization'
+        } else {
+          // For team groups, match by namespace (group_id contains the namespace)
+          // selectedGroup.name is the namespace (e.g., "test/group2/ttt")
+          // kb.namespace is also the namespace
+          return kb.group_type === 'group' && kb.namespace === selectedGroup.name
+        }
+      })
+
       return (
         <KnowledgeGroupListPage
           groupId={selectedGroup.id}
           groupName={selectedGroup.displayName}
           knowledgeBases={groupKbs}
+          knowledgeBasesWithGroupInfo={groupKbsWithInfo}
           isLoading={isGroupKbsLoading}
           onBack={handleBackFromGroup}
           onSelectKb={handleSelectKb}
@@ -630,7 +778,7 @@ export function KnowledgeDocumentPageDesktop() {
           isPersonalMode={isPersonalMode}
           personalCreatedByMe={isPersonalMode ? sidebar.personalCreatedByMe : undefined}
           personalSharedWithMe={isPersonalMode ? sidebar.personalSharedWithMe : undefined}
-          getKbGroupInfo={isPersonalMode ? sidebar.getKbGroupInfo : undefined}
+          getKbGroupInfo={sidebar.getKbGroupInfo}
         />
       )
     }
@@ -670,6 +818,7 @@ export function KnowledgeDocumentPageDesktop() {
             onSelectKb={handleSelectKb}
             onSelectGroup={handleSelectGroup}
             onSelectAll={handleSelectAll}
+            onSelectGroups={handleSelectGroups}
             isAdmin={sidebar.isAdmin}
             onCollapse={() => updateSidebarCollapsed(true)}
           />

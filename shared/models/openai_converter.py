@@ -22,8 +22,14 @@ from dataclasses import asdict
 from typing import Any, Optional
 
 from .execution import ExecutionRequest
+from .knowledge import KnowledgeBaseToolAccessMode
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_kb_tool_access_mode(value: Optional[str]) -> str:
+    """Normalize KB tool access mode to a non-null value."""
+    return value or KnowledgeBaseToolAccessMode.FULL
 
 
 def get_metadata_field(task: dict, field: str, default=None):
@@ -159,9 +165,14 @@ class OpenAIRequestConverter:
             "skill_configs": request.skill_configs,
             "preload_skills": request.preload_skills,
             "user_selected_skills": request.user_selected_skills,
+            "skill_refs": request.skill_refs,
+            "preload_skill_refs": request.preload_skill_refs,
             "knowledge_base_ids": request.knowledge_base_ids,
             "document_ids": request.document_ids,
             "is_user_selected_kb": request.is_user_selected_kb,
+            "kb_tool_access_mode": normalize_kb_tool_access_mode(
+                request.kb_tool_access_mode
+            ),
             "table_contexts": request.table_contexts,
             "kb_meta_prompt": request.kb_meta_prompt,
             "task_data": request.task_data,
@@ -307,10 +318,15 @@ class OpenAIRequestConverter:
             skill_configs=metadata.get("skill_configs", []),
             preload_skills=metadata.get("preload_skills", []),
             user_selected_skills=metadata.get("user_selected_skills", []),
+            skill_refs=metadata.get("skill_refs", {}),
+            preload_skill_refs=metadata.get("preload_skill_refs", {}),
             mcp_servers=mcp_servers,
             knowledge_base_ids=metadata.get("knowledge_base_ids"),
             document_ids=metadata.get("document_ids"),
             is_user_selected_kb=metadata.get("is_user_selected_kb", True),
+            kb_tool_access_mode=normalize_kb_tool_access_mode(
+                metadata.get("kb_tool_access_mode")
+            ),
             table_contexts=metadata.get("table_contexts", []),
             kb_meta_prompt=metadata.get("kb_meta_prompt", "") or "",
             task_data=metadata.get("task_data"),

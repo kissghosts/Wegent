@@ -33,6 +33,7 @@ export interface DeviceHandlers {
   handleDeleteDevice: (device: DeviceInfo) => Promise<void>
   handleCancelTask: (taskId: number) => Promise<void>
   handleUpgradeDevice: (device: DeviceInfo) => Promise<void>
+  handleEditAlias: (device: DeviceInfo, newAlias: string) => Promise<void>
 }
 
 /**
@@ -140,11 +141,16 @@ export function useDeviceHandlers(): DeviceHandlers {
   const handleUpgradeDevice = useCallback(
     async (device: DeviceInfo) => {
       // Check if executor version supports auto-upgrade (>= 1.6.5)
-      if (device.executor_version && !isVersionAtLeast(device.executor_version, MIN_AUTO_UPGRADE_VERSION)) {
-        toast.error(t('upgrade.unsupportedVersion', {
-          current: device.executor_version,
-          required: MIN_AUTO_UPGRADE_VERSION
-        }))
+      if (
+        device.executor_version &&
+        !isVersionAtLeast(device.executor_version, MIN_AUTO_UPGRADE_VERSION)
+      ) {
+        toast.error(
+          t('upgrade.unsupportedVersion', {
+            current: device.executor_version,
+            required: MIN_AUTO_UPGRADE_VERSION,
+          })
+        )
         return
       }
 
@@ -159,11 +165,33 @@ export function useDeviceHandlers(): DeviceHandlers {
     [t]
   )
 
+  /**
+   * Handle editing a device's alias (display name).
+   * Shows success/error toast notification.
+   *
+   * @param device - Device to edit
+   * @param newAlias - New alias for the device
+   */
+  const handleEditAlias = useCallback(
+    async (device: DeviceInfo, newAlias: string) => {
+      try {
+        await deviceApis.updateDeviceAlias(device.device_id, newAlias)
+        toast.success(t('edit_alias_success', { alias: newAlias }))
+        // Refresh devices to update the display name
+        await refreshDevices()
+      } catch {
+        toast.error(t('edit_alias_error'))
+      }
+    },
+    [refreshDevices, t]
+  )
+
   return {
     handleStartTask,
     handleSetDefault,
     handleDeleteDevice,
     handleCancelTask,
     handleUpgradeDevice,
+    handleEditAlias,
   }
 }

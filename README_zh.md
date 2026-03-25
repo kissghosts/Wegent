@@ -451,6 +451,13 @@ docker compose up -d     # 启动
             <br />
             <sub><b>Salt-hai</b></sub>
         </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/wxcfox">
+            <img src="https://avatars.githubusercontent.com/u/33141411?v=4" width="80;" alt="wxcfox"/>
+            <br />
+            <sub><b>wxcfox</b></sub>
+        </a>
     </td></tr>
 </table>
 <!-- readme: contributors -end -->

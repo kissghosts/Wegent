@@ -21,6 +21,8 @@ from typing import Any, Optional, Union
 
 from dacite import Config, from_dict
 
+from .knowledge import KnowledgeBaseToolAccessMode
+
 
 class EventType(str, Enum):
     """Unified execution event types.
@@ -103,6 +105,13 @@ class ExecutionRequest:
     skills: list = field(
         default_factory=list
     )  # From ChatRequest: Skill metadata for prompt injection
+    skill_refs: dict = field(
+        default_factory=dict
+    )  # Mapping from skill name to skill metadata for precise identification
+    # Format: {"skill_name": {"skill_id": 101, "namespace": "default", "is_public": false}}
+    preload_skill_refs: dict = field(
+        default_factory=dict
+    )  # Mapping for preload skills, can override same-name skill_refs during download
 
     # === MCP Configuration ===
     # Format: [{"name": "server_name", "url": "...", "type": "...", "auth": {...}}]
@@ -113,6 +122,7 @@ class ExecutionRequest:
     document_ids: Optional[list] = None
     table_contexts: list = field(default_factory=list)
     is_user_selected_kb: bool = True
+    kb_tool_access_mode: str = KnowledgeBaseToolAccessMode.FULL
 
     # === Workspace Configuration ===
     workspace: dict = field(default_factory=dict)

@@ -50,7 +50,6 @@ interface GroupTreeNode {
   /** The display name for this level (last segment of the path) */
   levelDisplayName: string
 }
-
 export interface NavigationSectionProps {
   /** Knowledge groups */
   groups: KnowledgeGroup[]
@@ -60,6 +59,8 @@ export interface NavigationSectionProps {
   selectedGroupId: string | null
   /** Whether "All" is selected */
   isAllSelected: boolean
+  /** Whether "Groups" is selected (show all groups list) */
+  isGroupsSelected: boolean
   /** Whether section is expanded */
   isExpanded: boolean
   /** Toggle expand/collapse */
@@ -68,6 +69,8 @@ export interface NavigationSectionProps {
   onSelectAll: () => void
   /** Select a group */
   onSelectGroup: (groupId: string) => void
+  /** Select "Groups" to show all groups list */
+  onSelectGroups: () => void
   /** Total KB count */
   totalKbCount: number
 }
@@ -127,7 +130,23 @@ function NavItem({
         )}
         data-testid={testId}
       >
-        {/* Expand/collapse icon for items with children, or placeholder for alignment */}
+        {/* Icon */}
+        <span className="flex-shrink-0 text-text-secondary">{icon}</span>
+
+        {/* Label */}
+        <span className="flex-1 text-left truncate">{label}</span>
+
+        {/* Action button (e.g., settings) - always visible, before count */}
+        {actionButton && (
+          <span className="flex-shrink-0 flex items-center" onClick={e => e.stopPropagation()}>
+            {actionButton}
+          </span>
+        )}
+
+        {/* Count */}
+        <span className="text-xs text-text-muted tabular-nums">{count}</span>
+
+        {/* Expand/collapse icon for items with children - moved to right side */}
         {hasChildren ? (
           <span
             className="flex-shrink-0 w-4 h-4 flex items-center justify-center cursor-pointer hover:bg-muted rounded"
@@ -139,33 +158,14 @@ function NavItem({
               <ChevronRight className="w-3.5 h-3.5" />
             )}
           </span>
-        ) : (
-          <span className="flex-shrink-0 w-4 h-4" />
-        )}
-
-        {/* Icon */}
-        <span className="flex-shrink-0 text-text-secondary">{icon}</span>
-
-        {/* Label */}
-        <span className="flex-1 text-left truncate">{label}</span>
-
-        {/* Action button (e.g., settings) - always visible, before count */}
-        {actionButton && (
-          <span className="flex-shrink-0" onClick={e => e.stopPropagation()}>
-            {actionButton}
-          </span>
-        )}
-
-        {/* Count */}
-        <span className="text-xs text-text-muted tabular-nums">{count}</span>
+        ) : null}
       </button>
 
-      {/* Children (sub-groups) */}
-      {hasChildren && isExpanded && children && <div className="ml-4 mt-0.5">{children}</div>}
+      {/* Children (sub-groups) - show if children exist */}
+      {children && <div className="ml-2 mt-0.5">{children}</div>}
     </div>
   )
 }
-
 /**
  * Build tree structure from flat group list.
  * Groups use '/' as separator for hierarchy (e.g., 'parent/child').
@@ -284,7 +284,7 @@ function TreeGroupItem({
         )}
 
         <Users className="w-3.5 h-3.5 flex-shrink-0 text-text-secondary" />
-        <span className="flex-1 text-left truncate text-xs">{node.levelDisplayName}</span>
+        <span className="flex-1 text-left truncate text-sm">{node.levelDisplayName}</span>
         <span className="text-xs text-text-muted tabular-nums">{node.group.kbCount}</span>
       </button>
 
@@ -313,10 +313,12 @@ export function NavigationSection({
   isLoading,
   selectedGroupId,
   isAllSelected,
+  isGroupsSelected,
   isExpanded: _isExpanded,
   onToggle: _onToggle,
   onSelectAll,
   onSelectGroup,
+  onSelectGroups,
   totalKbCount,
 }: NavigationSectionProps) {
   const { t } = useTranslation('knowledge')
@@ -329,9 +331,6 @@ export function NavigationSection({
 
   // Build tree structure for team groups
   const groupTree = useMemo(() => buildGroupTree(teamGroups), [teamGroups])
-
-  // Local expand state for "Groups" section
-  const [isGroupsExpanded, setIsGroupsExpanded] = useState(true)
 
   // Track expanded state for each group in the tree (persisted in localStorage)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => {
@@ -416,27 +415,31 @@ export function NavigationSection({
         />
       )}
 
-      {/* Groups (组) - with tree structure */}
+      {/* Groups (组) - with tree structure, always expanded without collapse arrow */}
       <NavItem
         icon={<Users className="w-4 h-4" />}
         label={t('document.sidebar.groups', '组')}
         count={teamGroupsTotalCount}
-        isSelected={false}
-        onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
+        isSelected={isGroupsSelected}
+        onClick={onSelectGroups}
         testId="nav-groups-item"
-        hasChildren={teamGroups.length > 0}
-        isExpanded={isGroupsExpanded}
-        onToggleExpand={() => setIsGroupsExpanded(!isGroupsExpanded)}
         actionButton={
-          <button
-            type="button"
+          <span
+            role="button"
+            tabIndex={0}
             onClick={handleGroupsSettingsClick}
-            className="p-1 hover:bg-muted rounded transition-colors"
+            onKeyDown={e => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                handleGroupsSettingsClick()
+              }
+            }}
+            className="hover:bg-muted rounded transition-colors cursor-pointer inline-flex items-center justify-center w-4 h-4"
             title={t('document.sidebar.groupSettings', '组设置')}
             data-testid="nav-groups-settings"
           >
             <Settings className="w-3.5 h-3.5 text-text-muted hover:text-text-primary" />
-          </button>
+          </span>
         }
       >
         {/* Sub-groups tree - hierarchical structure */}

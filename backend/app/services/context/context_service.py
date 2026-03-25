@@ -659,40 +659,6 @@ class ContextService:
         # Wrap in <attachment> XML tags
         return prefix
 
-    def build_message_with_attachment(
-        self,
-        message: str,
-        context: SubtaskContext,
-    ) -> Union[str, Dict[str, Any]]:
-        """
-        Build a message with attachment content.
-
-        For image attachments, returns a vision-compatible message structure.
-        For text documents, returns combined text message.
-
-        Args:
-            message: User's original message
-            context: SubtaskContext with extracted text or image data
-
-        Returns:
-            For images: Dict with vision content structure
-            For documents: String with combined text
-        """
-        if self.is_image_context(context) and context.image_base64:
-            return {
-                "type": "vision",
-                "text": message,
-                "image_base64": context.image_base64,
-                "mime_type": context.mime_type,
-                "filename": context.original_filename,
-            }
-
-        doc_prefix = self.build_document_text_prefix(context)
-        if doc_prefix:
-            return f"{doc_prefix}[User Question]:\n{message}"
-
-        return message
-
     # ==================== Knowledge Base Operations ====================
 
     def create_knowledge_base_context(
@@ -753,6 +719,7 @@ class ContextService:
         injection_mode: str,
         query: str,
         chunks_count: int,
+        restricted_mode: bool = False,
     ) -> Optional[SubtaskContext]:
         """
         Update knowledge base context with RAG retrieval results.
@@ -769,6 +736,7 @@ class ContextService:
             injection_mode: "direct_injection" or "rag_retrieval"
             query: Original search query
             chunks_count: Number of chunks retrieved/injected
+            restricted_mode: Whether this result came from Restricted Analyst mode
 
         Returns:
             Updated SubtaskContext or None if not found
@@ -813,6 +781,7 @@ class ContextService:
             "query": query,
             "chunks_count": chunks_count,
             "retrieval_count": retrieval_count,
+            "restricted_mode": restricted_mode,
         }
 
         # Preserve existing fields (like kb_head_result) and update rag_result
@@ -1011,6 +980,7 @@ class ContextService:
                 "query": result_data.get("query", ""),
                 "chunks_count": result_data.get("chunks_count", 0),
                 "retrieval_count": 1,
+                "restricted_mode": result_data.get("restricted_mode", False),
             }
             type_data["rag_result"] = rag_result
             # Note: Flat fields removed to avoid duplication - use rag_result sub-object
