@@ -11,7 +11,6 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Literal, Optional
 
-import tiktoken
 from sqlalchemy.orm import Session
 
 from app.services.adapters.retriever_kinds import retriever_kinds_service
@@ -32,8 +31,6 @@ CHAT_SHELL_MAX_ALL_CHUNKS = 10000
 CHAT_SHELL_DEFAULT_MAX_DIRECT_CHUNKS = 500
 CHAT_SHELL_DIRECT_INJECTION_FORMATTING_OVERHEAD = 50
 CHAT_SHELL_DIRECT_INJECTION_CHARS_PER_TOKEN = 4
-CHAT_SHELL_TOKEN_SAMPLE_DOC_LIMIT = 5
-CHAT_SHELL_TOKEN_SAMPLE_CHAR_LIMIT = 20_000
 
 
 class RetrievalService:
@@ -76,7 +73,7 @@ class RetrievalService:
         knowledge_base_ids: list[int],
         document_ids: Optional[list[int]] = None,
     ) -> int:
-        """Estimate aggregate KB token usage from extracted-text samples."""
+        """Estimate aggregate KB token usage using the existing text-length heuristic."""
         from sqlalchemy import func
 
         from app.models.knowledge import KnowledgeDocument
@@ -85,61 +82,38 @@ class RetrievalService:
         if not knowledge_base_ids:
             return 0
 
-        filters = [
-            KnowledgeDocument.kind_id.in_(knowledge_base_ids),
-            KnowledgeDocument.is_active == True,
+        if not document_ids:
+            total_estimated_tokens = 0
+            for kb_id in knowledge_base_ids:
+                stats = KnowledgeService.get_active_document_text_length_stats(
+                    db, kb_id
+                )
+                total_estimated_tokens += int(stats.text_length_total * 1.5)
+            return total_estimated_tokens
+
+        selected_documents = (
+            db.query(KnowledgeDocument.attachment_id)
+            .filter(
+                KnowledgeDocument.kind_id.in_(knowledge_base_ids),
+                KnowledgeDocument.is_active == True,
+                KnowledgeDocument.id.in_(document_ids),
+            )
+            .all()
+        )
+        attachment_ids = [
+            attachment_id
+            for attachment_id, in selected_documents
+            if attachment_id and attachment_id > 0
         ]
-        if document_ids:
-            filters.append(KnowledgeDocument.id.in_(document_ids))
+        if not attachment_ids:
+            return 0
 
         total_text_length = (
             db.query(func.coalesce(func.sum(SubtaskContext.text_length), 0))
-            .select_from(KnowledgeDocument)
-            .outerjoin(
-                SubtaskContext,
-                KnowledgeDocument.attachment_id == SubtaskContext.id,
-            )
-            .filter(*filters)
+            .filter(SubtaskContext.id.in_(attachment_ids))
             .scalar()
         )
-        total_text_length = int(total_text_length or 0)
-        if total_text_length <= 0:
-            return 0
-
-        sample_rows = (
-            db.query(SubtaskContext.extracted_text)
-            .select_from(KnowledgeDocument)
-            .outerjoin(
-                SubtaskContext,
-                KnowledgeDocument.attachment_id == SubtaskContext.id,
-            )
-            .filter(*filters, SubtaskContext.extracted_text.isnot(None))
-            .order_by(KnowledgeDocument.created_at.desc())
-            .limit(CHAT_SHELL_TOKEN_SAMPLE_DOC_LIMIT)
-            .all()
-        )
-
-        encoding = tiktoken.get_encoding("cl100k_base")
-        sampled_chars = 0
-        sampled_tokens = 0
-        for row in sample_rows:
-            text = row[0] or ""
-            if not text:
-                continue
-
-            remaining_chars = CHAT_SHELL_TOKEN_SAMPLE_CHAR_LIMIT - sampled_chars
-            if remaining_chars <= 0:
-                break
-
-            sample_text = text[:remaining_chars]
-            sampled_chars += len(sample_text)
-            sampled_tokens += len(encoding.encode(sample_text))
-
-        if sampled_chars <= 0 or sampled_tokens <= 0:
-            return int(total_text_length * 1.5)
-
-        tokens_per_char = sampled_tokens / sampled_chars
-        return max(sampled_tokens, int(total_text_length * tokens_per_char))
+        return int((total_text_length or 0) * 1.5)
 
     @staticmethod
     def _should_use_direct_injection(
