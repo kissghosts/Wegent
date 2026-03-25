@@ -73,7 +73,17 @@ class RetrievalService:
         knowledge_base_ids: list[int],
         document_ids: Optional[list[int]] = None,
     ) -> int:
-        """Estimate aggregate KB token usage using the existing text-length heuristic."""
+        """Estimate aggregate KB token usage using the existing text-length heuristic.
+
+        This estimate is intentionally coarse. It is only used for the first-pass
+        auto-routing decision, while the final direct-injection decision is still
+        protected by `_can_finalize_direct_injection()` with runtime chunk-count
+        and context-budget checks.
+
+        We keep the long-standing `text_length * 1.5` heuristic here to stay
+        aligned with `/kb-size` and avoid introducing a heavier tokenizer-based
+        preflight path on every retrieve request.
+        """
         from sqlalchemy import func
 
         from app.models.knowledge import KnowledgeDocument
@@ -82,37 +92,25 @@ class RetrievalService:
         if not knowledge_base_ids:
             return 0
 
-        if not document_ids:
-            total_estimated_tokens = 0
-            for kb_id in knowledge_base_ids:
-                stats = KnowledgeService.get_active_document_text_length_stats(
-                    db, kb_id
-                )
-                total_estimated_tokens += int(stats.text_length_total * 1.5)
-            return total_estimated_tokens
-
-        selected_documents = (
-            db.query(KnowledgeDocument.attachment_id)
-            .filter(
-                KnowledgeDocument.kind_id.in_(knowledge_base_ids),
-                KnowledgeDocument.is_active == True,
-                KnowledgeDocument.id.in_(document_ids),
+        document_query = db.query(
+            func.coalesce(func.sum(SubtaskContext.text_length), 0)
+        )
+        document_query = document_query.select_from(KnowledgeDocument).join(
+            SubtaskContext,
+            KnowledgeDocument.attachment_id == SubtaskContext.id,
+        )
+        document_query = document_query.filter(
+            KnowledgeDocument.kind_id.in_(knowledge_base_ids),
+            KnowledgeDocument.is_active == True,
+        )
+        if document_ids:
+            document_query = document_query.filter(
+                KnowledgeDocument.id.in_(document_ids)
             )
-            .all()
-        )
-        attachment_ids = [
-            attachment_id
-            for attachment_id, in selected_documents
-            if attachment_id and attachment_id > 0
-        ]
-        if not attachment_ids:
-            return 0
 
-        total_text_length = (
-            db.query(func.coalesce(func.sum(SubtaskContext.text_length), 0))
-            .filter(SubtaskContext.id.in_(attachment_ids))
-            .scalar()
-        )
+        total_text_length = document_query.scalar()
+        # Keep the same heuristic for both whole-KB and document-scoped
+        # estimation so routing behavior stays stable and predictable.
         return int((total_text_length or 0) * 1.5)
 
     @staticmethod
