@@ -11,6 +11,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Literal, Optional
 
+import tiktoken
 from sqlalchemy.orm import Session
 
 from app.services.adapters.retriever_kinds import retriever_kinds_service
@@ -22,6 +23,7 @@ from app.services.rag.retrieval_persistence_service import (
 )
 from app.services.rag.storage.base import BaseStorageBackend
 from app.services.rag.storage.factory import create_storage_backend
+from shared.telemetry.decorators import add_span_event, set_span_attribute, trace_async
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,8 @@ CHAT_SHELL_MAX_ALL_CHUNKS = 10000
 CHAT_SHELL_DEFAULT_MAX_DIRECT_CHUNKS = 500
 CHAT_SHELL_DIRECT_INJECTION_FORMATTING_OVERHEAD = 50
 CHAT_SHELL_DIRECT_INJECTION_CHARS_PER_TOKEN = 4
+CHAT_SHELL_TOKEN_SAMPLE_DOC_LIMIT = 5
+CHAT_SHELL_TOKEN_SAMPLE_CHAR_LIMIT = 20_000
 
 
 class RetrievalService:
@@ -70,13 +74,72 @@ class RetrievalService:
     def _estimate_total_tokens_for_knowledge_bases(
         db: Session,
         knowledge_base_ids: list[int],
+        document_ids: Optional[list[int]] = None,
     ) -> int:
-        """Estimate aggregate KB token usage using the same heuristic as kb-size."""
-        total_estimated_tokens = 0
-        for kb_id in knowledge_base_ids:
-            stats = KnowledgeService.get_active_document_text_length_stats(db, kb_id)
-            total_estimated_tokens += int(stats.text_length_total * 1.5)
-        return total_estimated_tokens
+        """Estimate aggregate KB token usage from extracted-text samples."""
+        from sqlalchemy import func
+
+        from app.models.knowledge import KnowledgeDocument
+        from app.models.subtask_context import SubtaskContext
+
+        if not knowledge_base_ids:
+            return 0
+
+        filters = [
+            KnowledgeDocument.kind_id.in_(knowledge_base_ids),
+            KnowledgeDocument.is_active == True,
+        ]
+        if document_ids:
+            filters.append(KnowledgeDocument.id.in_(document_ids))
+
+        total_text_length = (
+            db.query(func.coalesce(func.sum(SubtaskContext.text_length), 0))
+            .select_from(KnowledgeDocument)
+            .outerjoin(
+                SubtaskContext,
+                KnowledgeDocument.attachment_id == SubtaskContext.id,
+            )
+            .filter(*filters)
+            .scalar()
+        )
+        total_text_length = int(total_text_length or 0)
+        if total_text_length <= 0:
+            return 0
+
+        sample_rows = (
+            db.query(SubtaskContext.extracted_text)
+            .select_from(KnowledgeDocument)
+            .outerjoin(
+                SubtaskContext,
+                KnowledgeDocument.attachment_id == SubtaskContext.id,
+            )
+            .filter(*filters, SubtaskContext.extracted_text.isnot(None))
+            .order_by(KnowledgeDocument.created_at.desc())
+            .limit(CHAT_SHELL_TOKEN_SAMPLE_DOC_LIMIT)
+            .all()
+        )
+
+        encoding = tiktoken.get_encoding("cl100k_base")
+        sampled_chars = 0
+        sampled_tokens = 0
+        for row in sample_rows:
+            text = row[0] or ""
+            if not text:
+                continue
+
+            remaining_chars = CHAT_SHELL_TOKEN_SAMPLE_CHAR_LIMIT - sampled_chars
+            if remaining_chars <= 0:
+                break
+
+            sample_text = text[:remaining_chars]
+            sampled_chars += len(sample_text)
+            sampled_tokens += len(encoding.encode(sample_text))
+
+        if sampled_chars <= 0 or sampled_tokens <= 0:
+            return int(total_text_length * 1.5)
+
+        tokens_per_char = sampled_tokens / sampled_chars
+        return max(sampled_tokens, int(total_text_length * tokens_per_char))
 
     @staticmethod
     def _should_use_direct_injection(
@@ -139,20 +202,43 @@ class RetrievalService:
         max_direct_chunks: int,
     ) -> bool:
         """Finalize whether direct injection should be used for the current request."""
-        if route_mode == "direct_injection":
-            return True
+        rejection_reason = RetrievalService._get_direct_injection_rejection_reason(
+            route_mode=route_mode,
+            direct_records=direct_records,
+            direct_injection_estimated_tokens=direct_injection_estimated_tokens,
+            available_injection_tokens=available_injection_tokens,
+            context_window=context_window,
+            max_direct_chunks=max_direct_chunks,
+        )
+        return rejection_reason is None
+
+    @staticmethod
+    def _get_direct_injection_rejection_reason(
+        route_mode: Literal["auto", "direct_injection", "rag_retrieval"],
+        direct_records: list[Dict[str, Any]],
+        direct_injection_estimated_tokens: int,
+        available_injection_tokens: Optional[int],
+        context_window: Optional[int],
+        max_direct_chunks: int,
+    ) -> Optional[str]:
+        """Return the reason direct injection cannot be finalized."""
         if route_mode == "rag_retrieval":
-            return False
+            return "route_mode_forced_rag"
         if len(direct_records) > max_direct_chunks:
-            return False
+            return "max_direct_chunks_exceeded"
         if context_window and direct_injection_estimated_tokens > int(
             context_window * CHAT_SHELL_DIRECT_INJECTION_RATIO
         ):
-            return False
+            return "context_ratio_exceeded"
         if available_injection_tokens is not None:
-            return direct_injection_estimated_tokens <= available_injection_tokens
-        return True
+            if direct_injection_estimated_tokens > available_injection_tokens:
+                return "runtime_budget_exceeded"
+        return None
 
+    @trace_async(
+        span_name="rag.retrieve_for_chat_shell",
+        tracer_name="backend.services.rag",
+    )
     async def retrieve_for_chat_shell(
         self,
         query: str,
@@ -177,7 +263,13 @@ class RetrievalService:
         in chat_shell: whether to fetch all chunks for direct injection, or perform
         regular RAG retrieval.
         """
+        set_span_attribute("rag.route_mode", route_mode)
+        set_span_attribute("rag.kb_count", len(knowledge_base_ids))
+        set_span_attribute("rag.document_filter_count", len(document_ids or []))
+
         if not knowledge_base_ids:
+            set_span_attribute("rag.final_mode", "rag_retrieval")
+            add_span_event("rag.routing.empty_request")
             return {
                 "mode": "rag_retrieval",
                 "records": [],
@@ -189,7 +281,9 @@ class RetrievalService:
         total_estimated_tokens = 0
         if route_mode == "auto":
             total_estimated_tokens = self._estimate_total_tokens_for_knowledge_bases(
-                db, knowledge_base_ids
+                db=db,
+                knowledge_base_ids=knowledge_base_ids,
+                document_ids=document_ids,
             )
         use_direct_injection = self._should_use_direct_injection(
             context_window=context_window,
@@ -201,6 +295,14 @@ class RetrievalService:
             used_context_tokens=used_context_tokens,
             reserved_output_tokens=reserved_output_tokens,
             context_buffer_ratio=context_buffer_ratio,
+        )
+        add_span_event(
+            "rag.routing.candidate_evaluated",
+            {
+                "route_mode": route_mode,
+                "estimated_tokens": total_estimated_tokens,
+                "direct_candidate": use_direct_injection,
+            },
         )
 
         logger.info(
@@ -251,6 +353,14 @@ class RetrievalService:
             direct_injection_estimated_tokens = self._estimate_direct_injection_tokens(
                 direct_records
             )
+            fallback_reason = self._get_direct_injection_rejection_reason(
+                route_mode=route_mode,
+                direct_records=direct_records,
+                direct_injection_estimated_tokens=direct_injection_estimated_tokens,
+                available_injection_tokens=available_injection_tokens,
+                context_window=context_window,
+                max_direct_chunks=max_direct_chunks,
+            )
             can_finalize_direct = self._can_finalize_direct_injection(
                 route_mode=route_mode,
                 direct_records=direct_records,
@@ -271,9 +381,26 @@ class RetrievalService:
             if can_finalize_direct:
                 records = direct_records
                 mode = "direct_injection"
+                set_span_attribute("rag.final_mode", mode)
+                add_span_event(
+                    "rag.routing.direct_injection_selected",
+                    {
+                        "record_count": len(direct_records),
+                        "estimated_tokens": direct_injection_estimated_tokens,
+                    },
+                )
             else:
                 logger.info(
-                    "[RAG] Falling back to rag_retrieval after Backend-side direct injection fit check"
+                    "[RAG] Falling back to rag_retrieval after Backend-side direct injection fit check: %s",
+                    fallback_reason,
+                )
+                add_span_event(
+                    "rag.routing.direct_injection_fallback",
+                    {
+                        "attempted_direct_chunks": len(direct_records),
+                        "estimated_tokens": direct_injection_estimated_tokens,
+                        "fallback_reason": fallback_reason or "unknown",
+                    },
                 )
                 use_direct_injection = False
 
@@ -300,8 +427,16 @@ class RetrievalService:
             records.sort(key=lambda x: x.get("score", 0.0) or 0.0, reverse=True)
             records = records[:max_results]
             mode = "rag_retrieval"
+            set_span_attribute("rag.final_mode", mode)
 
         try:
+            add_span_event(
+                "rag.routing.persist_result",
+                {
+                    "mode": mode,
+                    "record_count": len(records),
+                },
+            )
             retrieval_persistence_service.persist_retrieval_result(
                 db=db,
                 user_subtask_id=user_subtask_id,

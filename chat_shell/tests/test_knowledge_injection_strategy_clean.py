@@ -307,19 +307,23 @@ class TestKnowledgeBaseToolClean:
         """Test Backend-routed retrieval returns empty grouped chunks."""
         tool = KnowledgeBaseTool()
         tool.knowledge_base_ids = [1]
-        tool.db_session = MagicMock()
+        tool.db_session = None
 
         with patch.object(
-            tool, "_retrieve_with_strategy_from_all_kbs", new_callable=AsyncMock
-        ) as mock_method:
-            mock_method.return_value = ("rag_retrieval", {})
+            tool, "_retrieve_with_strategy_via_http", new_callable=AsyncMock
+        ) as mock_retrieve:
+            mock_retrieve.return_value = {
+                "mode": "rag_retrieval",
+                "records": [],
+                "total": 0,
+            }
 
             route_mode, kb_chunks = await tool._retrieve_with_strategy_from_all_kbs(
                 "test query", 5
             )
 
-            assert route_mode == "rag_retrieval"
-            assert kb_chunks == {}
+        assert route_mode == "rag_retrieval"
+        assert kb_chunks == {}
 
     @pytest.mark.asyncio
     async def test_retrieve_with_strategy_via_http_sends_runtime_budget(self):
@@ -358,6 +362,16 @@ class TestKnowledgeBaseToolClean:
         assert persistence_context["user_subtask_id"] == 123
         assert persistence_context["user_id"] == 456
         assert persistence_context["restricted_mode"] is False
+
+    def test_build_runtime_context_uses_effective_context_window(self):
+        """Runtime context should fall back to the effective model budget."""
+        tool = KnowledgeBaseTool()
+        tool.model_id = "claude-3-5-sonnet"
+        tool.context_window = None
+
+        runtime_context = tool._build_runtime_context()
+
+        assert runtime_context["context_window"] == tool._get_effective_context_window()
 
     @pytest.mark.asyncio
     async def test_format_direct_injection_result(self):

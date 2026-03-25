@@ -861,7 +861,7 @@ class KnowledgeBaseTool(BaseTool):
     ) -> Dict[str, Any]:
         """Build runtime context budget for Backend-side routing."""
         return {
-            "context_window": self.context_window,
+            "context_window": self._get_effective_context_window(),
             "used_context_tokens": self._get_used_context_tokens(),
             "reserved_output_tokens": reserved_output_tokens,
             "context_buffer_ratio": self.context_buffer_ratio,
@@ -940,7 +940,7 @@ class KnowledgeBaseTool(BaseTool):
                     route_mode=route_mode,
                     user_id=self.user_id,
                     user_subtask_id=self.user_subtask_id,
-                    context_window=self.context_window,
+                    context_window=self._get_effective_context_window(),
                     used_context_tokens=self._get_used_context_tokens(),
                     reserved_output_tokens=DEFAULT_RESERVED_OUTPUT_TOKENS,
                     context_buffer_ratio=self.context_buffer_ratio,

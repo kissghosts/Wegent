@@ -145,10 +145,11 @@ class RetrievalPersistenceService:
         if not user_subtask_id or not records:
             return
 
-        if user_id is None:
+        if user_id is None or user_id == 0:
             logger.warning(
-                "[RAG] Skip persistence because user_id is missing: subtask_id=%s",
+                "[RAG] Skip persistence because user_id is missing: subtask_id=%s, user_id=%s",
                 user_subtask_id,
+                user_id,
             )
             return
 

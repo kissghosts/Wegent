@@ -70,11 +70,11 @@ class TestRetrieveForChatShell:
 
         db = MagicMock()
 
-        with patch(
-            "app.services.rag.retrieval_service.KnowledgeService.get_active_document_text_length_stats"
-        ) as mock_stats:
-            mock_stats.return_value = MagicMock(text_length_total=100)
-
+        with patch.object(
+            RetrievalService,
+            "_estimate_total_tokens_for_knowledge_bases",
+            return_value=100,
+        ) as mock_estimate:
             service = RetrievalService()
             service.get_all_chunks_from_knowledge_base = AsyncMock(
                 return_value=[
@@ -96,6 +96,11 @@ class TestRetrieveForChatShell:
                 user_id=7,
             )
 
+        mock_estimate.assert_called_once_with(
+            db=db,
+            knowledge_base_ids=[123],
+            document_ids=None,
+        )
         assert result["mode"] == "direct_injection"
         assert result["total"] == 1
         assert result["records"][0]["score"] is None
@@ -110,11 +115,11 @@ class TestRetrieveForChatShell:
 
         db = MagicMock()
 
-        with patch(
-            "app.services.rag.retrieval_service.KnowledgeService.get_active_document_text_length_stats"
-        ) as mock_stats:
-            mock_stats.return_value = MagicMock(text_length_total=100)
-
+        with patch.object(
+            RetrievalService,
+            "_estimate_total_tokens_for_knowledge_bases",
+            return_value=100,
+        ):
             service = RetrievalService()
             service.get_all_chunks_from_knowledge_base = AsyncMock(
                 return_value=[
@@ -153,6 +158,95 @@ class TestRetrieveForChatShell:
 
         assert result["mode"] == "rag_retrieval"
         assert result["records"][0]["score"] == 0.9
+        assert result["records"][0]["knowledge_base_id"] == 123
+
+    @pytest.mark.asyncio
+    async def test_force_direct_route_respects_max_direct_chunks(self):
+        """Forced direct route should still fallback when chunk cap is exceeded."""
+        from app.services.rag.retrieval_service import RetrievalService
+
+        db = MagicMock()
+        service = RetrievalService()
+        service.get_all_chunks_from_knowledge_base = AsyncMock(
+            return_value=[
+                {
+                    "content": "chunk-1",
+                    "title": "doc-1",
+                    "doc_ref": "1",
+                    "metadata": {"page": 1},
+                },
+                {
+                    "content": "chunk-2",
+                    "title": "doc-2",
+                    "doc_ref": "2",
+                    "metadata": {"page": 2},
+                },
+            ]
+        )
+        service.retrieve_from_knowledge_base_internal = AsyncMock(
+            return_value={
+                "records": [
+                    {
+                        "content": "retrieved",
+                        "score": 0.9,
+                        "title": "doc-1",
+                        "metadata": {"page": 2},
+                    }
+                ]
+            }
+        )
+
+        result = await service.retrieve_for_chat_shell(
+            query="test",
+            knowledge_base_ids=[123],
+            db=db,
+            max_results=5,
+            route_mode="direct_injection",
+            max_direct_chunks=1,
+        )
+
+        assert result["mode"] == "rag_retrieval"
+        service.retrieve_from_knowledge_base_internal.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_route_estimates_only_filtered_documents(self):
+        """Document-scoped requests should pass document_ids into the estimate path."""
+        from app.services.rag.retrieval_service import RetrievalService
+
+        db = MagicMock()
+        service = RetrievalService()
+        service.get_all_chunks_from_knowledge_base = AsyncMock(
+            return_value=[
+                {
+                    "content": "chunk",
+                    "title": "doc-1",
+                    "doc_ref": "1",
+                    "metadata": {"page": 1},
+                }
+            ]
+        )
+
+        with patch.object(
+            RetrievalService,
+            "_estimate_total_tokens_for_knowledge_bases",
+            return_value=100,
+        ) as mock_estimate:
+            result = await service.retrieve_for_chat_shell(
+                query="test",
+                knowledge_base_ids=[123],
+                db=db,
+                max_results=5,
+                context_window=10000,
+                document_ids=[1],
+                user_id=7,
+            )
+
+        mock_estimate.assert_called_once_with(
+            db=db,
+            knowledge_base_ids=[123],
+            document_ids=[1],
+        )
+        assert result["mode"] == "direct_injection"
         assert result["records"][0]["knowledge_base_id"] == 123
 
     @pytest.mark.asyncio

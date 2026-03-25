@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.services.context.context_service import context_service
 from app.services.rag.retrieval_persistence_service import RetrievalPersistenceService
 
 
@@ -78,12 +79,14 @@ class TestRetrievalPersistenceService:
             },
         ]
 
-        with patch("app.services.context.context_service.context_service") as mock_ctx:
-            mock_ctx.get_knowledge_base_context_map_by_subtask.return_value = {}
-            mock_ctx.create_knowledge_base_context_with_result.return_value = MagicMock(
-                id=101
-            )
+        mock_get_context_map = MagicMock(return_value={})
+        mock_create_context = MagicMock(return_value=MagicMock(id=101))
 
+        with patch.multiple(
+            context_service,
+            get_knowledge_base_context_map_by_subtask=mock_get_context_map,
+            create_knowledge_base_context_with_result=mock_create_context,
+        ):
             self.service.persist_retrieval_result(
                 db=db,
                 user_subtask_id=12,
@@ -94,17 +97,13 @@ class TestRetrievalPersistenceService:
                 restricted_mode=False,
             )
 
-        mock_ctx.create_knowledge_base_context_with_result.assert_called_once()
-        mock_ctx.get_knowledge_base_context_map_by_subtask.assert_called_once_with(
+        mock_create_context.assert_called_once()
+        mock_get_context_map.assert_called_once_with(
             db=db,
             subtask_id=12,
             knowledge_ids=[7],
         )
-        result_data = (
-            mock_ctx.create_knowledge_base_context_with_result.call_args.kwargs[
-                "result_data"
-            ]
-        )
+        result_data = mock_create_context.call_args.kwargs["result_data"]
         assert result_data["query"] == "search query"
         assert result_data["injection_mode"] == "rag_retrieval"
         assert result_data["chunks_count"] == 2
@@ -128,11 +127,14 @@ class TestRetrievalPersistenceService:
         ]
         existing_context = MagicMock(id=88)
 
-        with patch("app.services.context.context_service.context_service") as mock_ctx:
-            mock_ctx.get_knowledge_base_context_map_by_subtask.return_value = {
-                9: existing_context
-            }
+        mock_get_context_map = MagicMock(return_value={9: existing_context})
+        mock_update_context = MagicMock()
 
+        with patch.multiple(
+            context_service,
+            get_knowledge_base_context_map_by_subtask=mock_get_context_map,
+            update_knowledge_base_retrieval_result=mock_update_context,
+        ):
             self.service.persist_retrieval_result(
                 db=db,
                 user_subtask_id=66,
@@ -143,14 +145,49 @@ class TestRetrievalPersistenceService:
                 restricted_mode=True,
             )
 
-        mock_ctx.update_knowledge_base_retrieval_result.assert_called_once()
-        mock_ctx.get_knowledge_base_context_map_by_subtask.assert_called_once_with(
+        mock_update_context.assert_called_once()
+        mock_get_context_map.assert_called_once_with(
             db=db,
             subtask_id=66,
             knowledge_ids=[9],
         )
-        update_kwargs = mock_ctx.update_knowledge_base_retrieval_result.call_args.kwargs
+        update_kwargs = mock_update_context.call_args.kwargs
         assert update_kwargs["context_id"] == 88
         assert update_kwargs["extracted_text"] == ""
         assert update_kwargs["restricted_mode"] is True
         assert update_kwargs["sources"][0]["title"] == "Source 1"
+
+    def test_persist_retrieval_result_skips_zero_user_id(self) -> None:
+        """Persistence should skip sentinel user_id=0."""
+        db = MagicMock()
+
+        mock_get_context_map = MagicMock()
+        mock_create_context = MagicMock()
+        mock_update_context = MagicMock()
+
+        with patch.multiple(
+            context_service,
+            get_knowledge_base_context_map_by_subtask=mock_get_context_map,
+            create_knowledge_base_context_with_result=mock_create_context,
+            update_knowledge_base_retrieval_result=mock_update_context,
+        ):
+            self.service.persist_retrieval_result(
+                db=db,
+                user_subtask_id=12,
+                user_id=0,
+                query="search query",
+                mode="rag_retrieval",
+                records=[
+                    {
+                        "content": "chunk 1",
+                        "title": "doc.md",
+                        "score": 0.9,
+                        "knowledge_base_id": 7,
+                    }
+                ],
+                restricted_mode=False,
+            )
+
+        mock_get_context_map.assert_not_called()
+        mock_create_context.assert_not_called()
+        mock_update_context.assert_not_called()
