@@ -79,7 +79,10 @@ class TestRetrievalPersistenceService:
         ]
 
         with patch("app.services.context.context_service.context_service") as mock_ctx:
-            mock_ctx.get_knowledge_base_context_by_subtask_and_kb_id.return_value = None
+            mock_ctx.get_knowledge_base_context_map_by_subtask.return_value = {}
+            mock_ctx.create_knowledge_base_context_with_result.return_value = MagicMock(
+                id=101
+            )
 
             self.service.persist_retrieval_result(
                 db=db,
@@ -92,6 +95,11 @@ class TestRetrievalPersistenceService:
             )
 
         mock_ctx.create_knowledge_base_context_with_result.assert_called_once()
+        mock_ctx.get_knowledge_base_context_map_by_subtask.assert_called_once_with(
+            db=db,
+            subtask_id=12,
+            knowledge_ids=[7],
+        )
         result_data = (
             mock_ctx.create_knowledge_base_context_with_result.call_args.kwargs[
                 "result_data"
@@ -121,9 +129,9 @@ class TestRetrievalPersistenceService:
         existing_context = MagicMock(id=88)
 
         with patch("app.services.context.context_service.context_service") as mock_ctx:
-            mock_ctx.get_knowledge_base_context_by_subtask_and_kb_id.return_value = (
-                existing_context
-            )
+            mock_ctx.get_knowledge_base_context_map_by_subtask.return_value = {
+                9: existing_context
+            }
 
             self.service.persist_retrieval_result(
                 db=db,
@@ -136,6 +144,11 @@ class TestRetrievalPersistenceService:
             )
 
         mock_ctx.update_knowledge_base_retrieval_result.assert_called_once()
+        mock_ctx.get_knowledge_base_context_map_by_subtask.assert_called_once_with(
+            db=db,
+            subtask_id=66,
+            knowledge_ids=[9],
+        )
         update_kwargs = mock_ctx.update_knowledge_base_retrieval_result.call_args.kwargs
         assert update_kwargs["context_id"] == 88
         assert update_kwargs["extracted_text"] == ""

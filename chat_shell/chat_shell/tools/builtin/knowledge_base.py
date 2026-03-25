@@ -24,7 +24,6 @@ from ..restricted_kb_summary import (
     build_safe_summary_fallback,
     summarize_restricted_kb_chunks,
 )
-from .knowledge_base_abc import KnowledgeBaseToolABC
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +58,13 @@ class KnowledgeBaseInput(BaseModel):
     )
 
 
-class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
+class KnowledgeBaseTool(BaseTool):
     """Knowledge base retrieval tool with intelligent context injection.
 
     This tool implements smart injection strategy that automatically chooses
     between direct injection and RAG retrieval based on context window capacity.
     When model context window can fit all KB content, it injects chunks directly.
     When space is insufficient, it falls back to traditional RAG retrieval.
-
-    Inherits from KnowledgeBaseToolABC to ensure consistent persistence behavior.
     """
 
     name: str = "knowledge_base_search"
@@ -1197,20 +1194,4 @@ class KnowledgeBaseTool(KnowledgeBaseToolABC, BaseTool):
                 "strategy_stats": self.injection_strategy.get_injection_statistics(),
             },
             ensure_ascii=False,
-        )
-
-    async def _persist_result(
-        self,
-        kb_id: int,
-        result_data: Dict[str, Any],
-    ) -> None:
-        """No-op placeholder for the shared KB tool ABC.
-
-        RAG search persistence is handled entirely by Backend retrieval.
-        Other KB tools still implement their own persistence paths.
-        """
-        logger.debug(
-            "[KnowledgeBaseTool] _persist_result is unused for knowledge_base_search: kb_id=%s, keys=%s",
-            kb_id,
-            sorted(result_data.keys()),
         )

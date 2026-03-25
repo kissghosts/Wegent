@@ -158,6 +158,11 @@ class RetrievalPersistenceService:
             records=records,
             restricted_mode=restricted_mode,
         )
+        existing_contexts = context_service.get_knowledge_base_context_map_by_subtask(
+            db=db,
+            subtask_id=user_subtask_id,
+            knowledge_ids=list(payload_by_kb.keys()),
+        )
 
         for kb_id, payload in payload_by_kb.items():
             chunks = payload.get("chunks", [])
@@ -174,28 +179,27 @@ class RetrievalPersistenceService:
                     restricted_mode=restricted_mode,
                 )
 
-            context = context_service.get_knowledge_base_context_by_subtask_and_kb_id(
-                db=db,
-                subtask_id=user_subtask_id,
-                knowledge_id=kb_id,
-            )
+            context = existing_contexts.get(kb_id)
 
             if context is None:
-                context_service.create_knowledge_base_context_with_result(
-                    db=db,
-                    subtask_id=user_subtask_id,
-                    knowledge_id=kb_id,
-                    user_id=user_id,
-                    tool_type="rag",
-                    result_data={
-                        "extracted_text": extracted_text,
-                        "sources": sources,
-                        "injection_mode": mode,
-                        "query": query,
-                        "chunks_count": len(chunks),
-                        "restricted_mode": restricted_mode,
-                    },
+                created_context = (
+                    context_service.create_knowledge_base_context_with_result(
+                        db=db,
+                        subtask_id=user_subtask_id,
+                        knowledge_id=kb_id,
+                        user_id=user_id,
+                        tool_type="rag",
+                        result_data={
+                            "extracted_text": extracted_text,
+                            "sources": sources,
+                            "injection_mode": mode,
+                            "query": query,
+                            "chunks_count": len(chunks),
+                            "restricted_mode": restricted_mode,
+                        },
+                    )
                 )
+                existing_contexts[kb_id] = created_context
                 continue
 
             context_service.update_knowledge_base_retrieval_result(
