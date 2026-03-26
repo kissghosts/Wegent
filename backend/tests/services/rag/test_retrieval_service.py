@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -248,6 +249,26 @@ class TestRetrieveForChatShell:
         )
         assert result["mode"] == "direct_injection"
         assert result["records"][0]["knowledge_base_id"] == 123
+
+    def test_estimate_total_tokens_supports_decimal_aggregate_result(self):
+        """Aggregate text-length queries may return Decimal depending on the driver."""
+        from app.services.rag.retrieval_service import RetrievalService
+
+        db = MagicMock()
+        query = MagicMock()
+        query.select_from.return_value = query
+        query.join.return_value = query
+        query.filter.return_value = query
+        query.scalar.return_value = Decimal("100")
+        db.query.return_value = query
+
+        estimated_tokens = RetrievalService._estimate_total_tokens_for_knowledge_bases(
+            db=db,
+            knowledge_base_ids=[123],
+            document_ids=None,
+        )
+
+        assert estimated_tokens == 150
 
     @pytest.mark.asyncio
     async def test_force_rag_route_uses_standard_retrieval(self):

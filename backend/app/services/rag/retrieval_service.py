@@ -109,9 +109,13 @@ class RetrievalService:
             )
 
         total_text_length = document_query.scalar()
+        normalized_text_length = int(total_text_length or 0)
         # Keep the same heuristic for both whole-KB and document-scoped
         # estimation so routing behavior stays stable and predictable.
-        return int((total_text_length or 0) * 1.5)
+        #
+        # Aggregate functions may still return Decimal on some database/driver
+        # combinations, so normalize to int before applying the heuristic.
+        return int(normalized_text_length * 1.5)
 
     @staticmethod
     def _should_use_direct_injection(
