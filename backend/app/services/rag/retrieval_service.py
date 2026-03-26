@@ -128,11 +128,23 @@ class RetrievalService:
             return True
         if route_mode == "rag_retrieval":
             return False
-        if not context_window or context_window <= 0:
-            return False
-        return total_estimated_tokens <= int(
-            context_window * CHAT_SHELL_DIRECT_INJECTION_RATIO
+        available_for_kb = (
+            RetrievalService._calculate_ratio_based_direct_injection_budget(
+                context_window
+            )
         )
+        if available_for_kb is None:
+            return False
+        return total_estimated_tokens <= available_for_kb
+
+    @staticmethod
+    def _calculate_ratio_based_direct_injection_budget(
+        context_window: Optional[int],
+    ) -> Optional[int]:
+        """Calculate the legacy direct-injection threshold used for coarse routing."""
+        if not context_window or context_window <= 0:
+            return None
+        return int(context_window * CHAT_SHELL_DIRECT_INJECTION_RATIO)
 
     @staticmethod
     def _estimate_direct_injection_tokens(
@@ -202,8 +214,14 @@ class RetrievalService:
             return "route_mode_forced_rag"
         if len(direct_records) > max_direct_chunks:
             return "max_direct_chunks_exceeded"
-        if context_window and direct_injection_estimated_tokens > int(
-            context_window * CHAT_SHELL_DIRECT_INJECTION_RATIO
+        available_for_kb = (
+            RetrievalService._calculate_ratio_based_direct_injection_budget(
+                context_window
+            )
+        )
+        if (
+            available_for_kb is not None
+            and direct_injection_estimated_tokens > available_for_kb
         ):
             return "context_ratio_exceeded"
         if available_injection_tokens is not None:
@@ -266,6 +284,9 @@ class RetrievalService:
             total_estimated_tokens=total_estimated_tokens,
             route_mode=route_mode,
         )
+        available_for_kb = self._calculate_ratio_based_direct_injection_budget(
+            context_window=context_window
+        )
         available_injection_tokens = self._calculate_available_injection_tokens(
             context_window=context_window,
             used_context_tokens=used_context_tokens,
@@ -284,7 +305,8 @@ class RetrievalService:
         logger.info(
             "[RAG] chat_shell routing: kb_count=%d, route_mode=%s, context_window=%s, "
             "estimated_tokens=%d, used_context_tokens=%d, reserved_output_tokens=%d, "
-            "context_buffer_ratio=%.2f, available_injection_tokens=%s, direct_candidate=%s",
+            "context_buffer_ratio=%.2f, available_for_kb=%s, "
+            "available_injection_tokens=%s, direct_candidate=%s",
             len(knowledge_base_ids),
             route_mode,
             context_window,
@@ -292,6 +314,7 @@ class RetrievalService:
             used_context_tokens,
             reserved_output_tokens,
             context_buffer_ratio,
+            available_for_kb,
             available_injection_tokens,
             use_direct_injection,
         )

@@ -429,6 +429,11 @@ class KbHeadTool(BaseTool):
                 return json.dumps(
                     {"error": "No document IDs provided"}, ensure_ascii=False
                 )
+            if not self.knowledge_base_ids:
+                return json.dumps(
+                    {"error": "No accessible knowledge bases configured"},
+                    ensure_ascii=False,
+                )
 
             logger.info(
                 f"[KbHeadTool] Reading {len(document_ids)} documents, offset={offset}, limit={limit}"

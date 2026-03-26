@@ -209,16 +209,42 @@ async def internal_retrieve(
         # Calculate total content size for logging
         total_content_chars = sum(len(r.get("content", "")) for r in records)
         total_content_kb = total_content_chars / 1024
+        available_for_kb = (
+            retrieval_service._calculate_ratio_based_direct_injection_budget(
+                runtime_context.context_window if runtime_context else None
+            )
+        )
+        available_injection_tokens = (
+            retrieval_service._calculate_available_injection_tokens(
+                context_window=(
+                    runtime_context.context_window if runtime_context else None
+                ),
+                used_context_tokens=(
+                    runtime_context.used_context_tokens if runtime_context else 0
+                ),
+                reserved_output_tokens=(
+                    runtime_context.reserved_output_tokens if runtime_context else 4096
+                ),
+                context_buffer_ratio=(
+                    runtime_context.context_buffer_ratio if runtime_context else 0.1
+                ),
+            )
+        )
 
         logger.info(
             "[internal_rag] Retrieved %d records in mode=%s for KBs %s, "
-            "total_size=%.2fKB, estimated_tokens=%d, used_context_tokens=%s, query: %s%s",
+            "total_size=%.2fKB, estimated_tokens=%d, context_window=%s, "
+            "used_context_tokens=%s, available_for_kb=%s, "
+            "available_injection_tokens=%s, query: %s%s",
             len(records),
             result.get("mode", "rag_retrieval"),
             knowledge_base_ids,
             total_content_kb,
             result.get("total_estimated_tokens", 0),
+            runtime_context.context_window if runtime_context else None,
             runtime_context.used_context_tokens if runtime_context else None,
+            available_for_kb,
+            available_injection_tokens,
             request.query[:50],
             (
                 f", filtered by {len(request.document_ids)} docs"

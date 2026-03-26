@@ -100,3 +100,18 @@ class TestKbHeadTool:
             "limit": 50,
             "knowledge_base_ids": [3],
         }
+
+    @pytest.mark.asyncio
+    async def test_arun_rejects_requests_without_kb_scope(self) -> None:
+        """Tool should fail closed when no KB scope is configured."""
+        tool = KbHeadTool(
+            knowledge_base_ids=[],
+            user_id=7,
+            user_subtask_id=8,
+        )
+
+        result = await tool._arun(document_ids=[101], offset=0, limit=20)
+
+        assert json.loads(result) == {
+            "error": "No accessible knowledge bases configured"
+        }

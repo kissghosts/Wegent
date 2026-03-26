@@ -193,7 +193,7 @@ class DocumentReadService:
             )
             document_ids_by_kb.setdefault(document.kind_id, []).append(document.id)
 
-        if user_subtask_id and user_id is not None:
+        if user_subtask_id and user_id is not None and user_id > 0:
             try:
                 self._persist_kb_head_usage(
                     db,
@@ -212,8 +212,10 @@ class DocumentReadService:
                 )
         elif user_subtask_id:
             logger.warning(
-                "[document_read] Skip kb_head persistence because user_id is missing: subtask_id=%s",
+                "[document_read] Skip kb_head persistence because user_id is missing or invalid: "
+                "subtask_id=%s, user_id=%s",
                 user_subtask_id,
+                user_id,
             )
 
         return results

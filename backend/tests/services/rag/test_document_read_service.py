@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.services.context.context_service import context_service
 from app.services.rag.document_read_service import DocumentReadService
 
 
@@ -29,6 +30,9 @@ class TestDocumentReadService:
             201: SimpleNamespace(id=201, extracted_text="wxyz0123456"),
         }
         existing_context = MagicMock(id=900)
+        mock_get_context_map = MagicMock()
+        mock_create_context = MagicMock()
+        mock_update_context = MagicMock()
 
         with (
             patch.object(self.service, "_load_documents", return_value=documents),
@@ -37,11 +41,14 @@ class TestDocumentReadService:
                 "_load_attachment_contexts",
                 return_value=attachments,
             ),
-            patch("app.services.context.context_service.context_service") as mock_ctx,
+            patch.multiple(
+                context_service,
+                get_knowledge_base_context_map_by_subtask=mock_get_context_map,
+                create_knowledge_base_context_with_result=mock_create_context,
+                update_knowledge_base_kb_head_result=mock_update_context,
+            ),
         ):
-            mock_ctx.get_knowledge_base_context_map_by_subtask.return_value = {
-                2: existing_context
-            }
+            mock_get_context_map.return_value = {2: existing_context}
 
             results = self.service.read_documents(
                 db=db,
@@ -57,12 +64,12 @@ class TestDocumentReadService:
         assert [result["content"] for result in results] == ["cdef", "nopq", "yz01"]
         assert [result["offset"] for result in results] == [2, 2, 2]
 
-        mock_ctx.get_knowledge_base_context_map_by_subtask.assert_called_once_with(
+        mock_get_context_map.assert_called_once_with(
             db=db,
             subtask_id=77,
             knowledge_ids=[1, 2],
         )
-        mock_ctx.create_knowledge_base_context_with_result.assert_called_once_with(
+        mock_create_context.assert_called_once_with(
             db=db,
             subtask_id=77,
             knowledge_id=1,
@@ -74,7 +81,7 @@ class TestDocumentReadService:
                 "limit": 4,
             },
         )
-        mock_ctx.update_knowledge_base_kb_head_result.assert_called_once_with(
+        mock_update_context.assert_called_once_with(
             db=db,
             context_id=900,
             document_ids=[21],
@@ -93,6 +100,9 @@ class TestDocumentReadService:
             101: SimpleNamespace(id=101, extracted_text="abcdefghijk"),
             201: SimpleNamespace(id=201, extracted_text="lmnopqrstuv"),
         }
+        mock_get_context_map = MagicMock()
+        mock_create_context = MagicMock()
+        mock_update_context = MagicMock()
 
         with (
             patch.object(self.service, "_load_documents", return_value=documents),
@@ -101,9 +111,14 @@ class TestDocumentReadService:
                 "_load_attachment_contexts",
                 return_value=attachments,
             ),
-            patch("app.services.context.context_service.context_service") as mock_ctx,
+            patch.multiple(
+                context_service,
+                get_knowledge_base_context_map_by_subtask=mock_get_context_map,
+                create_knowledge_base_context_with_result=mock_create_context,
+                update_knowledge_base_kb_head_result=mock_update_context,
+            ),
         ):
-            mock_ctx.get_knowledge_base_context_map_by_subtask.return_value = {}
+            mock_get_context_map.return_value = {}
 
             results = self.service.read_documents(
                 db=db,
@@ -122,12 +137,12 @@ class TestDocumentReadService:
             == "Access denied: document not in allowed knowledge bases"
         )
 
-        mock_ctx.get_knowledge_base_context_map_by_subtask.assert_called_once_with(
+        mock_get_context_map.assert_called_once_with(
             db=db,
             subtask_id=77,
             knowledge_ids=[1],
         )
-        mock_ctx.create_knowledge_base_context_with_result.assert_called_once_with(
+        mock_create_context.assert_called_once_with(
             db=db,
             subtask_id=77,
             knowledge_id=1,
@@ -139,4 +154,36 @@ class TestDocumentReadService:
                 "limit": 5,
             },
         )
-        mock_ctx.update_knowledge_base_kb_head_result.assert_not_called()
+        mock_update_context.assert_not_called()
+
+    def test_read_documents_skips_persistence_for_zero_user_id(self) -> None:
+        """Sentinel user_id=0 should not persist kb_head usage."""
+        db = MagicMock()
+        documents = {
+            11: SimpleNamespace(id=11, name="doc-11", attachment_id=101, kind_id=1),
+        }
+        attachments = {
+            101: SimpleNamespace(id=101, extracted_text="abcdefghijk"),
+        }
+
+        with (
+            patch.object(self.service, "_load_documents", return_value=documents),
+            patch.object(
+                self.service,
+                "_load_attachment_contexts",
+                return_value=attachments,
+            ),
+            patch.object(self.service, "_persist_kb_head_usage") as mock_persist,
+        ):
+            results = self.service.read_documents(
+                db=db,
+                document_ids=[11],
+                offset=0,
+                limit=5,
+                knowledge_base_ids=[1],
+                user_subtask_id=77,
+                user_id=0,
+            )
+
+        assert results[0]["id"] == 11
+        mock_persist.assert_not_called()
