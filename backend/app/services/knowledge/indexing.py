@@ -369,59 +369,6 @@ def extract_rag_config_from_knowledge_base(
     )
 
 
-def trigger_document_summary_if_enabled(
-    db: Session,
-    document_id: int,
-    user_id: int,
-    user_name: str,
-    kb_info: KnowledgeBaseIndexInfo,
-):
-    """
-    Trigger document summary generation if enabled.
-
-    Check both global setting and knowledge base setting before triggering.
-    Summary generation failure should not affect indexing result.
-
-    Args:
-        db: Database session
-        document_id: Document ID
-        user_id: User ID (the user who triggered the indexing)
-        user_name: Username for placeholder resolution
-        kb_info: Knowledge base index information
-    """
-    try:
-        global_summary_enabled = getattr(settings, "SUMMARY_ENABLED", False)
-        if global_summary_enabled and kb_info.summary_enabled:
-            from app.services.knowledge import get_summary_service
-
-            summary_service = get_summary_service(db)
-            # Use a dedicated event loop and ensure proper cleanup
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(
-                    summary_service.trigger_document_summary(
-                        document_id, user_id, user_name
-                    )
-                )
-            finally:
-                loop.run_until_complete(loop.shutdown_asyncgens())
-                loop.close()
-            logger.info(
-                f"[Indexing] Triggered document summary generation for document {document_id}"
-            )
-        else:
-            logger.debug(
-                f"[Indexing] Skipping document summary for {document_id}: summary not enabled "
-                f"(global={global_summary_enabled}, kb={kb_info.summary_enabled})"
-            )
-    except Exception as summary_error:
-        # Summary generation failure should not affect indexing result
-        logger.warning(
-            f"[Indexing] Failed to trigger document summary for {document_id}: {summary_error}"
-        )
-
-
 def run_document_indexing(
     knowledge_base_id: str,
     attachment_id: int,

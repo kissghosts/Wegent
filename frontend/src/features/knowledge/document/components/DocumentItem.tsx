@@ -177,17 +177,16 @@ export function DocumentItem({
     onViewDetail?.(document)
   }
 
-  const unavailableHint = isExcelExceedingSizeLimit
-    ? t('knowledge:document.document.excelFileSizeExceeded', {
-        extension: document.file_extension,
-        limit: 2,
-        size: (document.file_size / (1024 * 1024)).toFixed(2),
-      })
-    : !ragConfigured
-      ? t('knowledge:document.document.indexStatus.unavailableHint')
-      : isNotIndexed
-        ? t('knowledge:document.document.indexStatus.notIndexedHint')
-        : t('knowledge:document.document.indexStatus.unavailableHint')
+  let unavailableHint = t('knowledge:document.document.indexStatus.unavailableHint')
+  if (isExcelExceedingSizeLimit) {
+    unavailableHint = t('knowledge:document.document.excelFileSizeExceeded', {
+      extension: document.file_extension,
+      limit: 2,
+      size: (document.file_size / (1024 * 1024)).toFixed(2),
+    })
+  } else if (isNotIndexed) {
+    unavailableHint = t('knowledge:document.document.indexStatus.notIndexedHint')
+  }
 
   const unavailableLabel = isNotIndexed
     ? t('knowledge:document.document.indexStatus.notIndexed')

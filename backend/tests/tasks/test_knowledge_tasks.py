@@ -4,7 +4,7 @@
 
 """Tests for knowledge Celery tasks."""
 
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -48,6 +48,15 @@ def _task_kwargs() -> dict:
     }
 
 
+def _session_factory():
+    """Return a SessionLocal side effect that yields a fresh mock session."""
+
+    def _open_session():
+        return nullcontext(MagicMock())
+
+    return _open_session
+
+
 def test_index_document_task_retries_when_lock_is_held(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -87,50 +96,123 @@ def test_index_document_task_skips_after_lock_retry_exhaustion(
     assert result["reason"] == "lock_retry_exhausted"
 
 
-def test_index_document_task_marks_skip_result_as_failed(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_index_document_task_marks_skip_result_as_failed():
     start_decision = MagicMock(should_execute=True, reason="started")
     success_finalize_mock = MagicMock()
     failed_finalize_mock = MagicMock(return_value=True)
 
-    with _task_request_context(retries=0):
-        with patch(
-            "app.tasks.knowledge_tasks.distributed_lock.acquire_watchdog_context",
-            return_value=_lock_context(True),
-        ):
-            with patch(
+    with _task_request_context(retries=0), ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "app.tasks.knowledge_tasks.distributed_lock.acquire_watchdog_context",
+                return_value=_lock_context(True),
+            )
+        )
+        stack.enter_context(
+            patch(
                 "app.services.knowledge.index_state_machine.mark_document_index_started",
                 return_value=start_decision,
-            ):
-                with patch(
-                    "app.services.knowledge.index_state_machine.mark_document_index_succeeded",
-                    success_finalize_mock,
-                ):
-                    with patch(
-                        "app.services.knowledge.index_state_machine.mark_document_index_failed",
-                        failed_finalize_mock,
-                    ):
-                        with patch(
-                            "app.services.knowledge.indexing.run_document_indexing",
-                            return_value={
-                                "status": "skipped",
-                                "reason": "unsupported_document",
-                                "document_id": 4,
-                                "knowledge_base_id": "1",
-                            },
-                        ):
-                            with patch(
-                                "app.tasks.knowledge_tasks.SessionLocal",
-                                side_effect=[
-                                    nullcontext(MagicMock()),
-                                    nullcontext(MagicMock()),
-                                ],
-                            ):
-                                result = index_document_task.run(**_task_kwargs())
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.knowledge.index_state_machine.mark_document_index_succeeded",
+                success_finalize_mock,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.knowledge.index_state_machine.mark_document_index_failed",
+                failed_finalize_mock,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.knowledge.indexing.run_document_indexing",
+                return_value={
+                    "status": "skipped",
+                    "reason": "unsupported_document",
+                    "document_id": 4,
+                    "knowledge_base_id": "1",
+                },
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.tasks.knowledge_tasks.SessionLocal",
+                side_effect=_session_factory(),
+            )
+        )
+        result = index_document_task.run(**_task_kwargs())
 
     failed_finalize_mock.assert_called_once()
     success_finalize_mock.assert_not_called()
     assert result["status"] == "skipped"
     assert result["reason"] == "unsupported_document"
+    assert result["index_generation"] == 5
+
+
+def test_index_document_task_enqueues_summary_after_finalize():
+    start_decision = MagicMock(should_execute=True, reason="started")
+    success_finalize_mock = MagicMock(return_value=True)
+    summary_delay_mock = MagicMock()
+
+    with _task_request_context(retries=0), ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "app.tasks.knowledge_tasks.distributed_lock.acquire_watchdog_context",
+                return_value=_lock_context(True),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.knowledge.index_state_machine.mark_document_index_started",
+                return_value=start_decision,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.knowledge.index_state_machine.mark_document_index_succeeded",
+                success_finalize_mock,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.knowledge.indexing.run_document_indexing",
+                return_value={
+                    "status": "success",
+                    "document_id": 4,
+                    "knowledge_base_id": "1",
+                    "chunks_data": {"total_count": 8},
+                },
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.knowledge.indexing.get_kb_index_info",
+                return_value=MagicMock(summary_enabled=True),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.tasks.knowledge_tasks.generate_document_summary_task.delay",
+                summary_delay_mock,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.tasks.knowledge_tasks.SessionLocal",
+                side_effect=_session_factory(),
+            )
+        )
+
+        result = index_document_task.run(**(_task_kwargs() | {"trigger_summary": True}))
+
+    success_finalize_mock.assert_called_once()
+    summary_delay_mock.assert_called_once_with(
+        document_id=4,
+        user_id=3,
+        user_name="tester",
+    )
+    assert result["status"] == "success"
     assert result["index_generation"] == 5

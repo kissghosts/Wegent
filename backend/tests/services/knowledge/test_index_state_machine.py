@@ -75,6 +75,12 @@ def test_prepare_document_index_enqueue_schedules_new_generation(
 ):
     knowledge_base = _create_knowledge_base(test_db, test_user)
     document = _create_document(test_db, test_user, knowledge_base)
+    previous_updated_at = _utcnow() - timedelta(seconds=5)
+    test_db.query(KnowledgeDocument).filter(KnowledgeDocument.id == document.id).update(
+        {KnowledgeDocument.updated_at: previous_updated_at},
+        synchronize_session=False,
+    )
+    test_db.commit()
 
     decision = prepare_document_index_enqueue(test_db, document.id)
 
@@ -84,6 +90,7 @@ def test_prepare_document_index_enqueue_schedules_new_generation(
     assert decision.reason == "scheduled"
     assert document.index_status == DocumentIndexStatus.QUEUED
     assert document.index_generation == 1
+    assert document.updated_at > previous_updated_at
 
 
 def test_prepare_document_index_enqueue_skips_when_generation_is_active(
@@ -200,16 +207,49 @@ def test_prepare_document_index_enqueue_can_replace_active_generation(
         index_status=DocumentIndexStatus.INDEXING,
         index_generation=4,
     )
+    previous_updated_at = _utcnow() - timedelta(seconds=5)
+    test_db.query(KnowledgeDocument).filter(KnowledgeDocument.id == document.id).update(
+        {KnowledgeDocument.updated_at: previous_updated_at},
+        synchronize_session=False,
+    )
+    test_db.commit()
 
     decision = prepare_document_index_enqueue(
         test_db,
         document.id,
-        allow_if_success=True,
         replace_active=True,
     )
 
     test_db.refresh(document)
     assert decision.should_enqueue is True
+    assert decision.generation == 5
+    assert document.index_status == DocumentIndexStatus.QUEUED
+    assert document.index_generation == 5
+    assert document.updated_at > previous_updated_at
+
+
+def test_prepare_document_index_enqueue_allows_success_override(
+    test_db: Session, test_user: User
+):
+    knowledge_base = _create_knowledge_base(test_db, test_user)
+    document = _create_document(
+        test_db,
+        test_user,
+        knowledge_base,
+        is_active=True,
+        index_status=DocumentIndexStatus.SUCCESS,
+        index_generation=4,
+    )
+
+    decision = prepare_document_index_enqueue(
+        test_db,
+        document.id,
+        allow_if_success=True,
+    )
+
+    test_db.refresh(document)
+    assert decision.should_enqueue is True
+    assert decision.previous_status == DocumentIndexStatus.SUCCESS
     assert decision.generation == 5
     assert document.index_status == DocumentIndexStatus.QUEUED
     assert document.index_generation == 5
@@ -257,6 +297,37 @@ def test_mark_document_index_started_skips_not_indexed_document(
 
     assert decision.should_execute is False
     assert decision.reason == "not_scheduled"
+
+
+def test_mark_document_index_started_updates_timestamp_on_success(
+    test_db: Session, test_user: User
+):
+    knowledge_base = _create_knowledge_base(test_db, test_user)
+    document = _create_document(
+        test_db,
+        test_user,
+        knowledge_base,
+        index_status=DocumentIndexStatus.QUEUED,
+        index_generation=2,
+    )
+    previous_updated_at = _utcnow() - timedelta(seconds=5)
+    test_db.query(KnowledgeDocument).filter(KnowledgeDocument.id == document.id).update(
+        {KnowledgeDocument.updated_at: previous_updated_at},
+        synchronize_session=False,
+    )
+    test_db.commit()
+
+    decision = mark_document_index_started(
+        test_db,
+        document_id=document.id,
+        generation=2,
+    )
+
+    test_db.refresh(document)
+    assert decision.should_execute is True
+    assert decision.reason == "started"
+    assert document.index_status == DocumentIndexStatus.INDEXING
+    assert document.updated_at > previous_updated_at
 
 
 def test_mark_document_index_succeeded_only_updates_active_generation(

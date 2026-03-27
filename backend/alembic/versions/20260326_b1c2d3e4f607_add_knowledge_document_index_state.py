@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "b1c2d3e4f607"
-down_revision = "a7b8c9d0e1f3"
+down_revision = "b1c2d3e4f5g6"
 branch_labels = None
 depends_on = None
 
@@ -105,3 +105,6 @@ def downgrade() -> None:
     for column_name in ["index_generation", "index_status"]:
         if column_name in existing_columns:
             op.drop_column("knowledge_documents", column_name)
+
+    if conn.dialect.name == "postgresql":
+        INDEX_STATUS_ENUM.drop(conn, checkfirst=True)

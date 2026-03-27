@@ -1359,7 +1359,13 @@ class KnowledgeOrchestrator:
             }
 
         generation = enqueue_decision.generation
-        assert generation is not None
+        if generation is None:
+            message = (
+                "[Orchestrator] prepare_document_index_enqueue returned "
+                f"should_enqueue=True but generation is None for document {document.id}"
+            )
+            logger.error(message)
+            raise RuntimeError(message)
 
         try:
             async_result = index_document_task.delay(
@@ -1479,17 +1485,20 @@ class KnowledgeOrchestrator:
         )
         if not schedule_result["scheduled"]:
             reason = schedule_result["reason"]
+            reason_messages = {
+                "already_in_progress": "Reindex already in progress",
+                "already_indexed": "Document is already indexed",
+                "document_not_found": "Document not found",
+            }
+            message = reason_messages.get(reason, f"Reindex skipped: {reason}")
             logger.info(
-                f"[Orchestrator] Reindex skipped for document {document.id}: reason={reason}"
+                f"[Orchestrator] Reindex skipped for document {document.id}: "
+                f"reason={reason}, message={message}"
             )
             return {
                 "success": True,
                 "document_id": document.id,
-                "message": (
-                    "Reindex already in progress"
-                    if reason == "already_in_progress"
-                    else "Document is already indexed"
-                ),
+                "message": message,
                 "skipped": True,
                 "reason": reason,
             }

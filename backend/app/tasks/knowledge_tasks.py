@@ -33,6 +33,31 @@ KNOWLEDGE_INDEX_LOCK_RETRY_DELAY_SECONDS = (
 )
 
 
+def _enqueue_document_summary_task(
+    *,
+    document_id: int,
+    user_id: int,
+    user_name: str,
+) -> None:
+    """Enqueue document summary generation without blocking the indexing task."""
+    try:
+        generate_document_summary_task.delay(
+            document_id=document_id,
+            user_id=user_id,
+            user_name=user_name,
+        )
+        logger.info(
+            f"[Celery RAG Indexing] Enqueued document summary task: "
+            f"document_id={document_id}, user_id={user_id}"
+        )
+    except Exception as exc:
+        logger.warning(
+            f"[Celery RAG Indexing] Failed to enqueue document summary task for "
+            f"document {document_id}: {exc}",
+            exc_info=True,
+        )
+
+
 @celery_app.task(
     bind=True,
     name="app.tasks.knowledge_tasks.index_document",
@@ -83,7 +108,6 @@ def index_document_task(
     from app.services.knowledge.indexing import (
         get_kb_index_info,
         run_document_indexing,
-        trigger_document_summary_if_enabled,
     )
 
     task_id = getattr(self.request, "id", "unknown")
@@ -230,19 +254,6 @@ def index_document_task(
                     chunks=result.get("chunks_data"),
                     chunk_storage_enabled=settings.CHUNK_STORAGE_ENABLED,
                 )
-                if finalized and trigger_summary:
-                    kb_info = get_kb_index_info(
-                        db=finalize_db,
-                        knowledge_base_id=knowledge_base_id,
-                        current_user_id=user_id,
-                    )
-                    trigger_document_summary_if_enabled(
-                        db=finalize_db,
-                        document_id=document_id,
-                        user_id=user_id,
-                        user_name=user_name,
-                        kb_info=kb_info,
-                    )
 
             if not finalized:
                 logger.info(
@@ -257,6 +268,27 @@ def index_document_task(
                     "knowledge_base_id": knowledge_base_id,
                     "index_generation": index_generation,
                 }
+
+            if trigger_summary:
+                try:
+                    with SessionLocal() as summary_db:
+                        kb_info = get_kb_index_info(
+                            db=summary_db,
+                            knowledge_base_id=knowledge_base_id,
+                            current_user_id=user_id,
+                        )
+                    if settings.SUMMARY_ENABLED and kb_info.summary_enabled:
+                        _enqueue_document_summary_task(
+                            document_id=document_id,
+                            user_id=user_id,
+                            user_name=user_name,
+                        )
+                except Exception as summary_error:
+                    logger.warning(
+                        f"[Celery RAG Indexing] Failed to prepare document summary "
+                        f"for document {document_id}: {summary_error}",
+                        exc_info=True,
+                    )
 
             logger.info(
                 f"[Celery RAG Indexing] Completed: task_id={task_id}, "

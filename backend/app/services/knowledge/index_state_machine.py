@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.knowledge import DocumentIndexStatus, DocumentStatus, KnowledgeDocument
+from shared.telemetry.decorators import add_span_event, set_span_attribute, trace_sync
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,38 @@ def get_document_index_lock_name(document_id: int) -> str:
     return f"knowledge:index_document:{document_id}"
 
 
+def _record_transition(
+    event_name: str,
+    *,
+    document_id: int,
+    generation: Optional[int],
+    reason: str,
+    previous_status: Optional[DocumentIndexStatus] = None,
+) -> None:
+    """Attach transition details to the current telemetry span."""
+    attributes = {
+        "knowledge.document_id": document_id,
+        "knowledge.decision_reason": reason,
+    }
+    if generation is not None:
+        attributes["knowledge.index_generation"] = generation
+    if previous_status is not None:
+        attributes["knowledge.previous_index_status"] = previous_status.value
+
+    for key, value in attributes.items():
+        set_span_attribute(key, value)
+    add_span_event(event_name, attributes)
+
+
+@trace_sync(
+    span_name="knowledge.prepare_document_index_enqueue",
+    tracer_name="knowledge.state_machine",
+    extract_attributes=lambda db, document_id, allow_if_success=False, replace_active=False: {
+        "knowledge.document_id": document_id,
+        "knowledge.allow_if_success": allow_if_success,
+        "knowledge.replace_active": replace_active,
+    },
+)
 def prepare_document_index_enqueue(
     db: Session,
     document_id: int,
@@ -101,6 +134,13 @@ def prepare_document_index_enqueue(
         .first()
     )
     if document is None:
+        db.rollback()
+        _record_transition(
+            "knowledge.index.enqueue.skipped",
+            document_id=document_id,
+            generation=None,
+            reason="document_not_found",
+        )
         return IndexEnqueueDecision(
             should_enqueue=False,
             generation=None,
@@ -113,6 +153,13 @@ def prepare_document_index_enqueue(
         stale_reason = _get_active_index_stale_reason(document)
         if stale_reason is None:
             db.rollback()
+            _record_transition(
+                "knowledge.index.enqueue.skipped",
+                document_id=document_id,
+                generation=document.index_generation,
+                reason="already_in_progress",
+                previous_status=current_status,
+            )
             return IndexEnqueueDecision(
                 should_enqueue=False,
                 generation=document.index_generation,
@@ -124,6 +171,13 @@ def prepare_document_index_enqueue(
         document.index_generation = next_generation
         document.index_status = DocumentIndexStatus.QUEUED
         db.commit()
+        _record_transition(
+            "knowledge.index.enqueue.scheduled",
+            document_id=document_id,
+            generation=next_generation,
+            reason="scheduled_after_stale_recovery",
+            previous_status=current_status,
+        )
 
         return IndexEnqueueDecision(
             should_enqueue=True,
@@ -134,6 +188,13 @@ def prepare_document_index_enqueue(
 
     if current_status == DocumentIndexStatus.SUCCESS and not allow_if_success:
         db.rollback()
+        _record_transition(
+            "knowledge.index.enqueue.skipped",
+            document_id=document_id,
+            generation=document.index_generation,
+            reason="already_indexed",
+            previous_status=current_status,
+        )
         return IndexEnqueueDecision(
             should_enqueue=False,
             generation=document.index_generation,
@@ -146,6 +207,13 @@ def prepare_document_index_enqueue(
     document.index_status = DocumentIndexStatus.QUEUED
 
     db.commit()
+    _record_transition(
+        "knowledge.index.enqueue.scheduled",
+        document_id=document_id,
+        generation=next_generation,
+        reason="scheduled",
+        previous_status=current_status,
+    )
 
     return IndexEnqueueDecision(
         should_enqueue=True,
@@ -155,6 +223,14 @@ def prepare_document_index_enqueue(
     )
 
 
+@trace_sync(
+    span_name="knowledge.mark_document_index_enqueue_failed",
+    tracer_name="knowledge.state_machine",
+    extract_attributes=lambda db, document_id, generation: {
+        "knowledge.document_id": document_id,
+        "knowledge.index_generation": generation,
+    },
+)
 def mark_document_index_enqueue_failed(
     db: Session,
     document_id: int,
@@ -177,9 +253,23 @@ def mark_document_index_enqueue_failed(
         )
     )
     db.commit()
+    _record_transition(
+        "knowledge.index.enqueue.failed",
+        document_id=document_id,
+        generation=generation,
+        reason="enqueue_failed" if updated > 0 else "stale_or_missing_generation",
+    )
     return updated > 0
 
 
+@trace_sync(
+    span_name="knowledge.mark_document_index_started",
+    tracer_name="knowledge.state_machine",
+    extract_attributes=lambda db, document_id, generation: {
+        "knowledge.document_id": document_id,
+        "knowledge.index_generation": generation,
+    },
+)
 def mark_document_index_started(
     db: Session,
     document_id: int,
@@ -194,6 +284,12 @@ def mark_document_index_started(
     )
     if document is None:
         db.rollback()
+        _record_transition(
+            "knowledge.index.start.skipped",
+            document_id=document_id,
+            generation=generation,
+            reason="document_not_found",
+        )
         return IndexExecutionDecision(
             should_execute=False,
             reason="document_not_found",
@@ -201,6 +297,13 @@ def mark_document_index_started(
 
     if document.index_generation != generation:
         db.rollback()
+        _record_transition(
+            "knowledge.index.start.skipped",
+            document_id=document_id,
+            generation=generation,
+            reason="stale_generation",
+            previous_status=document.index_status,
+        )
         return IndexExecutionDecision(
             should_execute=False,
             reason="stale_generation",
@@ -209,6 +312,13 @@ def mark_document_index_started(
     current_status = document.index_status or DocumentIndexStatus.NOT_INDEXED
     if current_status == DocumentIndexStatus.SUCCESS:
         db.rollback()
+        _record_transition(
+            "knowledge.index.start.skipped",
+            document_id=document_id,
+            generation=generation,
+            reason="already_completed",
+            previous_status=current_status,
+        )
         return IndexExecutionDecision(
             should_execute=False,
             reason="already_completed",
@@ -216,6 +326,13 @@ def mark_document_index_started(
 
     if current_status == DocumentIndexStatus.NOT_INDEXED:
         db.rollback()
+        _record_transition(
+            "knowledge.index.start.skipped",
+            document_id=document_id,
+            generation=generation,
+            reason="not_scheduled",
+            previous_status=current_status,
+        )
         return IndexExecutionDecision(
             should_execute=False,
             reason="not_scheduled",
@@ -223,6 +340,13 @@ def mark_document_index_started(
 
     if current_status == DocumentIndexStatus.FAILED:
         db.rollback()
+        _record_transition(
+            "knowledge.index.start.skipped",
+            document_id=document_id,
+            generation=generation,
+            reason="already_failed",
+            previous_status=current_status,
+        )
         return IndexExecutionDecision(
             should_execute=False,
             reason="already_failed",
@@ -230,6 +354,13 @@ def mark_document_index_started(
 
     document.index_status = DocumentIndexStatus.INDEXING
     db.commit()
+    _record_transition(
+        "knowledge.index.start.accepted",
+        document_id=document_id,
+        generation=generation,
+        reason="started",
+        previous_status=current_status,
+    )
 
     return IndexExecutionDecision(
         should_execute=True,
@@ -237,6 +368,15 @@ def mark_document_index_started(
     )
 
 
+@trace_sync(
+    span_name="knowledge.mark_document_index_succeeded",
+    tracer_name="knowledge.state_machine",
+    extract_attributes=lambda db, document_id, generation, chunks=None, chunk_storage_enabled=False: {
+        "knowledge.document_id": document_id,
+        "knowledge.index_generation": generation,
+        "knowledge.chunk_storage_enabled": chunk_storage_enabled,
+    },
+)
 def mark_document_index_succeeded(
     db: Session,
     document_id: int,
@@ -271,9 +411,23 @@ def mark_document_index_succeeded(
         )
     )
     db.commit()
+    _record_transition(
+        "knowledge.index.finalize.success",
+        document_id=document_id,
+        generation=generation,
+        reason="finalized" if updated > 0 else "stale_or_already_finalized",
+    )
     return updated > 0
 
 
+@trace_sync(
+    span_name="knowledge.mark_document_index_failed",
+    tracer_name="knowledge.state_machine",
+    extract_attributes=lambda db, document_id, generation: {
+        "knowledge.document_id": document_id,
+        "knowledge.index_generation": generation,
+    },
+)
 def mark_document_index_failed(
     db: Session,
     document_id: int,
@@ -296,4 +450,10 @@ def mark_document_index_failed(
         )
     )
     db.commit()
+    _record_transition(
+        "knowledge.index.finalize.failed",
+        document_id=document_id,
+        generation=generation,
+        reason="finalized" if updated > 0 else "stale_or_already_finalized",
+    )
     return updated > 0
