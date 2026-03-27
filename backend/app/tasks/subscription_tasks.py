@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.core.celery_app import celery_app
 from app.core.config import settings
+from app.services.subscription.helpers import validate_subscription_for_read
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ def _load_subscription_execution_context(
         logger.error(f"[subscription_tasks] Subscription {subscription_id} not found")
         return None
 
-    subscription_crd = Subscription.model_validate(subscription.json)
+    subscription_crd = validate_subscription_for_read(subscription.json)
     internal = subscription.json.get("_internal", {})
     trigger_type = internal.get("trigger_type", "unknown")
 
@@ -160,7 +161,7 @@ def _load_subscription_execution_context(
             )
             return None
 
-        source_crd = Subscription.model_validate(source_subscription.json)
+        source_crd = validate_subscription_for_read(source_subscription.json)
         source_internal = source_subscription.json.get("_internal", {})
 
         # Verify source is still market visibility
@@ -720,6 +721,7 @@ def check_due_subscriptions(self):
 
                 # Filter due subscriptions based on _internal fields
                 due_subscriptions = []
+                skipped_invalid = 0
                 for sub in all_subscriptions:
                     internal = sub.json.get("_internal", {})
                     if not internal.get("enabled", True):
@@ -733,6 +735,11 @@ def check_due_subscriptions(self):
                     ]:
                         continue
 
+                    # Skip subscriptions with invalid trigger configurations
+                    if not _is_trigger_config_valid(sub.json):
+                        skipped_invalid += 1
+                        continue
+
                     next_exec_time_str = internal.get("next_execution_time")
                     if not next_exec_time_str:
                         continue
@@ -743,6 +750,11 @@ def check_due_subscriptions(self):
                             due_subscriptions.append(sub)
                     except (ValueError, TypeError):
                         continue
+
+                if skipped_invalid > 0:
+                    logger.warning(
+                        f"[subscription_tasks] Skipped {skipped_invalid} subscription(s) with invalid trigger config"
+                    )
 
                 total_due = len(due_subscriptions)
 
@@ -791,7 +803,7 @@ def check_due_subscriptions(self):
                                 f"(processed {offset + idx}/{total_due})"
                             )
                         try:
-                            subscription_crd = Subscription.model_validate(
+                            subscription_crd = validate_subscription_for_read(
                                 subscription.json
                             )
                             internal = subscription.json.get("_internal", {})
@@ -861,6 +873,49 @@ def check_due_subscriptions(self):
                     exc_info=True,
                 )
                 raise
+
+
+def _is_trigger_config_valid(json_data: Dict[str, Any]) -> bool:
+    """Check if subscription trigger configuration is valid.
+
+    Validates minimum interval requirements (default 15 minutes).
+
+    Args:
+        json_data: The subscription JSON data
+
+    Returns:
+        True if trigger config is valid, False otherwise
+    """
+    from app.core.config import settings
+
+    min_interval = settings.SUBSCRIPTION_MIN_INTERVAL_MINUTES
+
+    spec = json_data.get("spec", {})
+    trigger = spec.get("trigger", {})
+    trigger_type = trigger.get("type")
+
+    if trigger_type == "interval":
+        interval = trigger.get("interval", {})
+        if interval.get("unit") == "minutes":
+            value = interval.get("value", 1)
+            if value < min_interval:
+                return False
+    elif trigger_type == "cron":
+        cron_config = trigger.get("cron", {})
+        expression = cron_config.get("expression", "")
+        if expression:
+            parts = expression.strip().split()
+            if len(parts) == 5:
+                minute_part = parts[0]
+                if minute_part.startswith("*/"):
+                    try:
+                        interval = int(minute_part[2:])
+                        if interval < min_interval:
+                            return False
+                    except ValueError:
+                        pass
+
+    return True
 
 
 def _recover_stale_pending_executions(db: Session) -> int:
@@ -1553,7 +1608,7 @@ def check_due_subscriptions_sync():
             dispatched = 0
             for subscription in due_subscriptions:
                 try:
-                    subscription_crd = Subscription.model_validate(subscription.json)
+                    subscription_crd = validate_subscription_for_read(subscription.json)
                     internal = subscription.json.get("_internal", {})
                     trigger_type = internal.get("trigger_type")
 

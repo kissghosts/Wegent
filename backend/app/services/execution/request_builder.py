@@ -22,6 +22,7 @@ from app.models.subtask import Subtask
 from app.models.task import TaskResource
 from app.schemas.kind import Bot, Ghost, Shell, Team
 from app.services.mcp_provider_registry import list_mcp_providers
+from app.services.readers import KindType, kindReader
 from app.services.user_mcp_service import user_mcp_service
 from shared.models import ExecutionRequest
 from shared.models.db import Kind, User
@@ -57,8 +58,9 @@ class TaskRequestBuilder:
             db: Database session
         """
         self.db = db
-        # Cache shell_type to avoid repeated database queries
-        self._cached_shell_type: str | None = None
+        # Cache shell info by (user_id, namespace, shell_name)
+        # to avoid repeated database queries while keeping per-shell isolation.
+        self._cached_shell_info: dict[tuple[int, str, str], dict] = {}
 
     def build(
         self,
@@ -309,6 +311,7 @@ class TaskRequestBuilder:
             history_limit=history_limit,
             new_session=new_session,
             collaboration_model=collaboration_model,
+            mode=collaboration_model,
             auth_token=auth_token,
             backend_url=settings.BACKEND_INTERNAL_URL,
             attachments=attachments or [],
@@ -385,16 +388,12 @@ class TaskRequestBuilder:
 
         first_member = team_crd.spec.members[0]
 
-        bot = (
-            self.db.query(Kind)
-            .filter(
-                Kind.user_id == team.user_id,
-                Kind.kind == "Bot",
-                Kind.name == first_member.botRef.name,
-                Kind.namespace == first_member.botRef.namespace,
-                Kind.is_active,
-            )
-            .first()
+        bot = kindReader.get_by_name_and_namespace(
+            self.db,
+            team.user_id,
+            KindType.BOT,
+            first_member.botRef.namespace,
+            first_member.botRef.name,
         )
 
         if not bot:
@@ -645,6 +644,22 @@ class TaskRequestBuilder:
         This method queries the Shell CRD to get the shell_type.
         It's called once per builder instance and the result is cached.
 
+        Args:
+            bot: Bot Kind object
+            user_id: User ID for shell lookup
+
+        Returns:
+            Shell type string (e.g., "Chat", "ClaudeCode", "Agno")
+        """
+        shell_info = self._resolve_shell_info(bot, user_id)
+        return shell_info["shell_type"]
+
+    def _resolve_shell_info(self, bot: Kind, user_id: int) -> dict:
+        """Resolve shell info from bot's shellRef.
+
+        This method queries the Shell CRD to get shell_type and base_image.
+        It's called once per builder instance and the result is cached.
+
         Search order:
         1. User's private shell (user_id == user_id, namespace == shell_ref.namespace)
         2. Group shell (any user_id, namespace == shell_ref.namespace) - for group scenarios
@@ -655,22 +670,29 @@ class TaskRequestBuilder:
             user_id: User ID for shell lookup
 
         Returns:
-            Shell type string (e.g., "Chat", "ClaudeCode", "Agno")
+            dict: {"shell_type": str, "base_image": Optional[str]}
         """
-        # Return cached value if available
-        if self._cached_shell_type is not None:
-            return self._cached_shell_type
-
-        # Default value
-        shell_type = "Chat"
-
         bot_crd = Bot.model_validate(bot.json)
 
+        # Default values
+        shell_type = "Chat"
+        base_image = None
+
         if not (bot_crd.spec and bot_crd.spec.shellRef):
-            self._cached_shell_type = shell_type
-            return shell_type
+            return {
+                "shell_type": shell_type,
+                "base_image": base_image,
+            }
 
         shell_ref = bot_crd.spec.shellRef
+        cache_key = (user_id, shell_ref.namespace, shell_ref.name)
+
+        # Return cached value if available
+        cached = self._cached_shell_info.get(cache_key)
+        if cached is not None:
+            return cached
+
+        shell = None
 
         # 1. Query user's private shell first
         shell = (
@@ -712,22 +734,29 @@ class TaskRequestBuilder:
                 .first()
             )
 
-        # Extract shell_type from Shell CRD
+        # Extract shell_type and base_image from Shell CRD
         if shell and shell.json:
             shell_crd = Shell.model_validate(shell.json)
-            if shell_crd.spec and shell_crd.spec.shellType:
-                shell_type = shell_crd.spec.shellType
+            if shell_crd.spec:
+                if shell_crd.spec.shellType:
+                    shell_type = shell_crd.spec.shellType
+                base_image = shell_crd.spec.baseImage
 
         logger.debug(
-            "[TaskRequestBuilder] Resolved shell_type=%s for bot=%s (shell_ref=%s/%s)",
-            shell_type,
+            "[TaskRequestBuilder] Resolved shell_info for bot=%s (shell_ref=%s/%s): shell_type=%s, base_image=%s",
             bot_crd.metadata.name if bot_crd.metadata else "unknown",
             shell_ref.namespace,
             shell_ref.name,
+            shell_type,
+            base_image,
         )
 
-        self._cached_shell_type = shell_type
-        return shell_type
+        resolved_shell_info = {
+            "shell_type": shell_type,
+            "base_image": base_image,
+        }
+        self._cached_shell_info[cache_key] = resolved_shell_info
+        return resolved_shell_info
 
     # =========================================================================
     # Skill Resolution (from ChatConfigBuilder)
@@ -777,16 +806,12 @@ class TaskRequestBuilder:
             return [], [], [], {}
 
         # Query Ghost
-        ghost = (
-            self.db.query(Kind)
-            .filter(
-                Kind.user_id == team.user_id,
-                Kind.kind == "Ghost",
-                Kind.name == bot_crd.spec.ghostRef.name,
-                Kind.namespace == bot_crd.spec.ghostRef.namespace,
-                Kind.is_active == True,  # noqa: E712
-            )
-            .first()
+        ghost = kindReader.get_by_name_and_namespace(
+            self.db,
+            team.user_id,
+            KindType.GHOST,
+            bot_crd.spec.ghostRef.namespace,
+            bot_crd.spec.ghostRef.name,
         )
 
         if not ghost or not ghost.json:
@@ -1215,16 +1240,12 @@ class TaskRequestBuilder:
                 bot = first_bot
             else:
                 # Query additional bots
-                bot = (
-                    self.db.query(Kind)
-                    .filter(
-                        Kind.user_id == team.user_id,
-                        Kind.kind == "Bot",
-                        Kind.name == member.botRef.name,
-                        Kind.namespace == member.botRef.namespace,
-                        Kind.is_active,
-                    )
-                    .first()
+                bot = kindReader.get_by_name_and_namespace(
+                    self.db,
+                    team.user_id,
+                    KindType.BOT,
+                    member.botRef.namespace,
+                    member.botRef.name,
                 )
 
             if not bot:
@@ -1237,8 +1258,10 @@ class TaskRequestBuilder:
             bot_json = bot.json or {}
             bot_spec_json = bot_json.get("spec", {})
 
-            # Get shell_type
-            shell_type = self._resolve_shell_type(bot, team.user_id)
+            # Get shell_type and base_image from Shell CRD
+            shell_info = self._resolve_shell_info(bot, team.user_id)
+            shell_type = shell_info["shell_type"]
+            base_image = shell_info["base_image"]
 
             # Get ghost info for system_prompt and skills
             ghost_system_prompt = ""
@@ -1246,16 +1269,12 @@ class TaskRequestBuilder:
             ghost_skills = []
 
             if bot_spec and bot_spec.ghostRef:
-                ghost = (
-                    self.db.query(Kind)
-                    .filter(
-                        Kind.user_id == team.user_id,
-                        Kind.kind == "Ghost",
-                        Kind.name == bot_spec.ghostRef.name,
-                        Kind.namespace == bot_spec.ghostRef.namespace,
-                        Kind.is_active,
-                    )
-                    .first()
+                ghost = kindReader.get_by_name_and_namespace(
+                    self.db,
+                    team.user_id,
+                    KindType.GHOST,
+                    bot_spec.ghostRef.namespace,
+                    bot_spec.ghostRef.name,
                 )
                 if ghost and ghost.json:
                     ghost_crd = Ghost.model_validate(ghost.json)
@@ -1286,7 +1305,7 @@ class TaskRequestBuilder:
                 "mcp_servers": ghost_mcp_servers,
                 "skills": ghost_skills,
                 "role": member.role or "worker",
-                "base_image": bot_spec_json.get("baseImage"),
+                "base_image": base_image,
             }
             bot_configs.append(bot_config)
 
@@ -1412,17 +1431,12 @@ class TaskRequestBuilder:
         bot_crd = Bot.model_validate(bot.json)
 
         if bot_crd.spec and bot_crd.spec.ghostRef:
-            # Query Ghost
-            ghost = (
-                self.db.query(Kind)
-                .filter(
-                    Kind.user_id == team.user_id,
-                    Kind.kind == "Ghost",
-                    Kind.name == bot_crd.spec.ghostRef.name,
-                    Kind.namespace == bot_crd.spec.ghostRef.namespace,
-                    Kind.is_active,
-                )
-                .first()
+            ghost = kindReader.get_by_name_and_namespace(
+                self.db,
+                team.user_id,
+                KindType.GHOST,
+                bot_crd.spec.ghostRef.namespace,
+                bot_crd.spec.ghostRef.name,
             )
 
             if ghost and ghost.json:
