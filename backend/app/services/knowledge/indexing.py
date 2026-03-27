@@ -672,60 +672,13 @@ def run_document_indexing(
             },
         )
 
-        # Update document status after successful indexing
-        if document_id:
-            from app.models.knowledge import DocumentStatus, KnowledgeDocument
-
-            doc = (
-                db.query(KnowledgeDocument)
-                .filter(KnowledgeDocument.id == document_id)
-                .first()
-            )
-            if doc:
-                doc.is_active = True
-                doc.status = DocumentStatus.ENABLED
-                # Save chunk metadata if CHUNK_STORAGE_ENABLED
-                if settings.CHUNK_STORAGE_ENABLED:
-                    chunks_data = result.get("chunks_data")
-                    if chunks_data:
-                        doc.chunks = chunks_data
-                        logger.info(
-                            f"[Indexing] Saved {chunks_data.get('total_count', 0)} chunks metadata "
-                            f"for document {document_id}"
-                        )
-                else:
-                    logger.debug(
-                        f"[Indexing] Skipping chunk storage for document {document_id} "
-                        "(CHUNK_STORAGE_ENABLED=False)"
-                    )
-                db.commit()
-                logger.info(
-                    f"[Indexing] Updated document {document_id} status to ENABLED"
-                )
-                add_span_event(
-                    "rag.indexing.document.status_updated",
-                    {
-                        "document_id": str(document_id),
-                        "status": "ENABLED",
-                    },
-                )
-
-                # Trigger document summary generation if enabled
-                if trigger_summary:
-                    trigger_document_summary_if_enabled(
-                        db=db,
-                        document_id=document_id,
-                        user_id=user_id,
-                        user_name=user_name,
-                        kb_info=kb_info,
-                    )
-
         return {
             "status": "success",
             "document_id": document_id,
             "knowledge_base_id": knowledge_base_id,
             "indexed_count": indexed_count,
             "index_name": index_name,
+            "chunks_data": result.get("chunks_data"),
         }
 
     except Exception as e:

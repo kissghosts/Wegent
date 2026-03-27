@@ -24,7 +24,6 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
-    Text,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -46,6 +45,16 @@ class DocumentSourceType(str, PyEnum):
     TEXT = "text"  # Pasted text
     TABLE = "table"  # External table (DingTalk, Feishu, etc.)
     WEB = "web"  # Web page (scraped URL)
+
+
+class DocumentIndexStatus(str, PyEnum):
+    """Business status for document indexing lifecycle."""
+
+    NOT_INDEXED = "not_indexed"
+    QUEUED = "queued"
+    INDEXING = "indexing"
+    SUCCESS = "success"
+    FAILED = "failed"
 
 
 class KnowledgeDocument(Base):
@@ -79,6 +88,14 @@ class KnowledgeDocument(Base):
     is_active = Column(
         Boolean, nullable=False, default=False
     )  # Default to False, set to True after indexing completes
+    index_status = Column(
+        SQLEnum(
+            DocumentIndexStatus, values_callable=lambda obj: [e.value for e in obj]
+        ),
+        nullable=False,
+        default=DocumentIndexStatus.NOT_INDEXED,
+    )
+    index_generation = Column(Integer, nullable=False, default=0)
     splitter_config = Column(
         JSON, nullable=False, default={}
     )  # Splitter configuration for document chunking
