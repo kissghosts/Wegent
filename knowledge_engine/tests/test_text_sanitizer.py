@@ -9,9 +9,9 @@ from llama_index.core import Document
 from llama_index.core.schema import TextNode
 
 from knowledge_engine.index.indexer import DocumentIndexer
-from knowledge_engine.text_sanitizer import sanitize_text_for_indexing
 from knowledge_engine.storage.base import BaseStorageBackend
 from knowledge_engine.storage.chunk_metadata import ChunkMetadata
+from knowledge_engine.text_sanitizer import sanitize_text_for_indexing
 
 
 class _FakeStorageBackend(BaseStorageBackend):
@@ -140,7 +140,9 @@ class TestTextSanitizer:
         )
 
         # Mock the build_ingestion_result to capture sanitized documents
-        with patch("knowledge_engine.index.indexer.build_ingestion_result") as mock_build:
+        with patch(
+            "knowledge_engine.index.indexer.build_ingestion_result"
+        ) as mock_build:
             mock_build.return_value = MagicMock(
                 index_nodes=[TextNode(text="chunk")],
                 parent_nodes=None,
