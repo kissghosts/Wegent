@@ -5,7 +5,7 @@
 import pytest
 
 from app.schemas.kind import EmbeddingConfig
-from app.services.rag.embedding.capabilities import (
+from knowledge_engine.embedding.capabilities import (
     embedding_supports_image_input,
     normalize_additional_input_modalities,
 )

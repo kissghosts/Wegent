@@ -46,6 +46,12 @@ class _FakeStorageBackend(BaseStorageBackend):
     def delete_document(self, knowledge_id, doc_ref, **kwargs):
         return {"status": "success"}
 
+    def delete_knowledge(self, knowledge_id: str, **kwargs):
+        return {"status": "success"}
+
+    def drop_knowledge_index(self, knowledge_id: str, **kwargs):
+        return {"status": "success"}
+
     def get_document(self, knowledge_id, doc_ref, **kwargs):
         return {}
 
